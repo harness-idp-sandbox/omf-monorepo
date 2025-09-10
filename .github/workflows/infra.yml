@@ -84,7 +84,7 @@ jobs:
       - run: terraform init -input=false
       - run: terraform fmt -check
       - run: terraform validate
-      - run: terraform plan -input=false
+      - run: terraform plan -input=false -var-file=env/terraform.tfvars
 
   apply:
     needs: detect
@@ -102,4 +102,4 @@ jobs:
           role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
           aws-region:     ${{ needs.detect.outputs.aws_region }}   # <- use detected region
       - run: terraform init -input=false
-      - run: terraform apply -auto-approve -input=false
+      - run: terraform apply -auto-approve -input=false -var-file=env/terraform.tfvars
