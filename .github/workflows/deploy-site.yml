@@ -1,6 +1,8 @@
 name: deploy-site
 
 on:
+  repository_dispatch:
+    types: [deploy_site]
   push:
     branches: [ main ]
     paths:
@@ -17,8 +19,9 @@ permissions:
   id-token: write
   contents: read
 
+# Separate concurrency per ref or per dispatched app
 concurrency:
-  group: deploy-site-${{ github.workflow }}-${{ github.ref }}
+  group: deploy-site-${{ github.workflow }}-${{ github.event.client_payload.project_path || github.ref || 'na' }}
   cancel-in-progress: false
 
 jobs:
@@ -36,17 +39,24 @@ jobs:
         run: |
           set -euo pipefail
 
-          # 0) allow manual override
+          # 0) Manual override
           if [[ -n "${{ inputs.project_path || '' }}" ]]; then
             echo "project_path=${{ inputs.project_path }}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # 1) We're on a push to main (per workflow trigger). Diff before...sha.
+          # 1) repository_dispatch fast-path from infra.yml
+          if [[ "${{ github.event_name }}" == "repository_dispatch" && "${{ github.event.action }}" == "deploy_site" ]]; then
+            echo "project_path=${{ github.event.client_payload.project_path }}" >> "$GITHUB_OUTPUT"
+            echo "Detected app (dispatch): ${{ github.event.client_payload.project_path }}"
+            exit 0
+          fi
+
+          # 2) Push path: diff before...sha locally
           RANGE="${{ github.event.before }}...${{ github.sha }}"
           FILES="$(git diff --name-only "$RANGE")"
 
-          # 2) Derive the app folder that contains site/   <-- FIXED from infra -> site
+          # 3) Derive the app folder that contains site/
           APPS="$(echo "$FILES" | awk -F/ '($2=="site"){print $1}' | sort -u)"
           N=$(echo "$APPS" | grep -c . || true)
           if [[ $N -eq 0 ]]; then
@@ -58,13 +68,19 @@ jobs:
           echo "project_path=$(echo "$APPS")" >> "$GITHUB_OUTPUT"
           echo "Detected app: $APPS"
 
-      - name: Read region from tfvars
+      - name: Read region (dispatch payload or tfvars)
         id: region
         shell: bash
         env:
           APP_DIR: ${{ steps.detect.outputs.project_path }}
         run: |
           set -euo pipefail
+          # Prefer region from dispatch payload
+          if [[ "${{ github.event_name }}" == "repository_dispatch" && -n "${{ github.event.client_payload.aws_region }}" ]]; then
+            echo "region=${{ github.event.client_payload.aws_region }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Fallback to tfvars in repo
           FILE="$APP_DIR/infra/env/terraform.tfvars"
           REG=""
           if [[ -f "$FILE" ]]; then
@@ -89,20 +105,40 @@ jobs:
           role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
           aws-region:     ${{ needs.detect.outputs.aws_region }}
 
-      # Ensure providers/modules exist for reading outputs
+      # === If you have a remote backend set up, uncomment this block and remove the read-only init below ===
+      # - name: Terraform init (read remote state)
+      #   working-directory: ${{ needs.detect.outputs.project_path }}/infra
+      #   run: |
+      #     terraform init -input=false \
+      #       -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+      #       -backend-config="key=${{ needs.detect.outputs.project_path }}/terraform.tfstate" \
+      #       -backend-config="region=${{ secrets.TF_STATE_REGION || needs.detect.outputs.aws_region }}" \
+      #       -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}"
+
+      # Temporary local read-only init (works only if state is local in repo; otherwise outputs will be empty)
       - name: Terraform init (read-only)
         working-directory: ${{ needs.detect.outputs.project_path }}/infra
         run: terraform init -backend=false -input=false
 
-      - name: Sync to S3
+      - name: Read outputs (guard)
+        id: tfout
+        working-directory: ${{ needs.detect.outputs.project_path }}/infra
+        shell: bash
         run: |
-          set -e
-          BUCKET=$(cd infra && terraform output -raw bucket_name)
-          aws s3 sync site/ "s3://$BUCKET" --delete
+          set -euo pipefail
+          BUCKET="$(terraform output -raw bucket_name 2>/dev/null || true)"
+          if [[ -z "$BUCKET" ]]; then
+            echo "::error::No 'bucket_name' output. Infra may not be applied yet or state is unreachable. If you use remote state, enable the remote init block."
+            exit 2
+          fi
+          echo "bucket=$BUCKET" >> "$GITHUB_OUTPUT"
+
+      - name: Sync to S3
+        run: aws s3 sync site/ "s3://${{ steps.tfout.outputs.bucket }}" --delete
 
       - name: Invalidate CloudFront (if available)
         run: |
-          set -e
+          set -euo pipefail
           if DIST=$(cd infra && terraform output -raw cloudfront_distribution 2>/dev/null); then
             aws cloudfront create-invalidation --distribution-id "$DIST" --paths "/*"
           else
