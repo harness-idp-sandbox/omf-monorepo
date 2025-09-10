@@ -13,7 +13,13 @@ on:
         required: false
         type: string
 
-permissions: { id-token: write, contents: read }
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-site-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   detect:
@@ -30,17 +36,19 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Allow manual override
+          # 0) allow manual override
           if [[ -n "${{ inputs.project_path || '' }}" ]]; then
             echo "project_path=${{ inputs.project_path }}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # Find the single app folder that changed under */site/*
+          # 1) We're on a push to main (per workflow trigger). Diff before...sha.
           RANGE="${{ github.event.before }}...${{ github.sha }}"
-          APPS="$(git diff --name-only "$RANGE" | awk -F/ '($2=="site"){print $1}' | sort -u)"
-          N=$(echo "$APPS" | grep -c . || true)
+          FILES="$(git diff --name-only "$RANGE")"
 
+          # 2) Derive the app folder that contains site/   <-- FIXED from infra -> site
+          APPS="$(echo "$FILES" | awk -F/ '($2=="site"){print $1}' | sort -u)"
+          N=$(echo "$APPS" | grep -c . || true)
           if [[ $N -eq 0 ]]; then
             echo "No site changes detected"; exit 1
           elif [[ $N -gt 1 ]]; then
@@ -60,7 +68,6 @@ jobs:
           FILE="$APP_DIR/infra/env/terraform.tfvars"
           REG=""
           if [[ -f "$FILE" ]]; then
-            # matches: aws_region = "us-east-1"
             REG=$(awk -F= '/^\s*aws_region\s*=/{gsub(/[[:space:]"]/, "", $2); print $2}' "$FILE" | tail -n1)
           fi
           echo "region=${REG:-us-east-1}" >> "$GITHUB_OUTPUT"
@@ -82,7 +89,7 @@ jobs:
           role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
           aws-region:     ${{ needs.detect.outputs.aws_region }}
 
-      # Optional: ensure modules are present before reading outputs (read-only init)
+      # Ensure providers/modules exist for reading outputs
       - name: Terraform init (read-only)
         working-directory: ${{ needs.detect.outputs.project_path }}/infra
         run: terraform init -backend=false -input=false
