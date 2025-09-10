@@ -1,0 +1,103 @@
+name: deploy-site
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '**/site/**'
+      - '.github/workflows/deploy-site.yml'
+  workflow_dispatch:
+    inputs:
+      project_path:
+        description: 'App subdir (e.g., my-app)'
+        required: false
+        type: string
+
+permissions: { id-token: write, contents: read }
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      project_path: ${{ steps.detect.outputs.project_path }}
+      aws_region:  ${{ steps.region.outputs.region }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Allow manual override
+          if [[ -n "${{ inputs.project_path || '' }}" ]]; then
+            echo "project_path=${{ inputs.project_path }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Find the single app folder that changed under */site/*
+          RANGE="${{ github.event.before }}...${{ github.sha }}"
+          APPS="$(git diff --name-only "$RANGE" | awk -F/ '($2=="site"){print $1}' | sort -u)"
+          N=$(echo "$APPS" | grep -c . || true)
+
+          if [[ $N -eq 0 ]]; then
+            echo "No site changes detected"; exit 1
+          elif [[ $N -gt 1 ]]; then
+            echo "Multiple apps changed: $APPS"; exit 1
+          fi
+
+          echo "project_path=$(echo "$APPS")" >> "$GITHUB_OUTPUT"
+          echo "Detected app: $APPS"
+
+      - name: Read region from tfvars
+        id: region
+        shell: bash
+        env:
+          APP_DIR: ${{ steps.detect.outputs.project_path }}
+        run: |
+          set -euo pipefail
+          FILE="$APP_DIR/infra/env/terraform.tfvars"
+          REG=""
+          if [[ -f "$FILE" ]]; then
+            # matches: aws_region = "us-east-1"
+            REG=$(awk -F= '/^\s*aws_region\s*=/{gsub(/[[:space:]"]/, "", $2); print $2}' "$FILE" | tail -n1)
+          fi
+          echo "region=${REG:-us-east-1}" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: detect
+    runs-on: ubuntu-latest
+    environment: production
+    defaults:
+      run:
+        working-directory: ${{ needs.detect.outputs.project_path }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
+          aws-region:     ${{ needs.detect.outputs.aws_region }}
+
+      # Optional: ensure modules are present before reading outputs (read-only init)
+      - name: Terraform init (read-only)
+        working-directory: ${{ needs.detect.outputs.project_path }}/infra
+        run: terraform init -backend=false -input=false
+
+      - name: Sync to S3
+        run: |
+          set -e
+          BUCKET=$(cd infra && terraform output -raw bucket_name)
+          aws s3 sync site/ "s3://$BUCKET" --delete
+
+      - name: Invalidate CloudFront (if available)
+        run: |
+          set -e
+          if DIST=$(cd infra && terraform output -raw cloudfront_distribution 2>/dev/null); then
+            aws cloudfront create-invalidation --distribution-id "$DIST" --paths "/*"
+          else
+            echo "No cloudfront_distribution output; skipping invalidation."
+          fi

@@ -1,0 +1,105 @@
+name: infra
+on:
+  push:
+    branches: ['**']
+    paths: ['**/infra/**', '.github/workflows/infra.yml']
+  pull_request:
+    paths: ['**/infra/**', '.github/workflows/infra.yml']
+  workflow_dispatch:
+    inputs:
+      project_path:
+        description: 'App subdir (e.g. my-app)'
+        required: false
+        type: string
+
+permissions: { id-token: write, contents: read }
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      project_path: ${{ steps.detect.outputs.project_path }}
+      aws_region:  ${{ steps.region.outputs.region }}   # <- expose region to other jobs
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          # allow manual override
+          if [[ -n "${{ inputs.project_path || '' }}" ]]; then
+            echo "project_path=${{ inputs.project_path }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # derive changed app folder that contains infra/
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            git fetch origin "${{ github.event.pull_request.base.ref }}" "${{ github.event.pull_request.head.ref }}" --depth=1
+            RANGE="origin/${{ github.event.pull_request.base.ref }}...origin/${{ github.event.pull_request.head.ref }}"
+          else
+            RANGE="${{ github.event.before }}...${{ github.sha }}"
+          fi
+
+          APPS="$(git diff --name-only "$RANGE" | awk -F/ '($2=="infra"){print $1}' | sort -u)"
+          N=$(echo "$APPS" | grep -c . || true)
+          if [[ $N -eq 0 ]]; then
+            echo "No infra changes detected"; exit 1
+          elif [[ $N -gt 1 ]]; then
+            echo "Multiple apps changed: $APPS"; exit 1
+          fi
+          echo "project_path=$(echo "$APPS")" >> "$GITHUB_OUTPUT"
+          echo "Detected app: $APPS"
+
+      - name: Read region from tfvars
+        id: region
+        shell: bash
+        env:
+          APP_DIR: ${{ steps.detect.outputs.project_path }}   # <- use steps.detect (same job), not needs.*
+        run: |
+          set -euo pipefail
+          FILE="$APP_DIR/infra/env/terraform.tfvars"
+          REG=""
+          if [[ -f "$FILE" ]]; then
+            # grabs: aws_region = "us-east-1"
+            REG=$(awk -F= '/^\s*aws_region\s*=/{gsub(/[[:space:]"]/, "", $2); print $2}' "$FILE" | tail -n1)
+          fi
+          echo "region=${REG:-us-east-1}" >> "$GITHUB_OUTPUT"
+
+  plan:
+    needs: detect
+    if: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ needs.detect.outputs.project_path }}/infra
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
+          aws-region:     ${{ needs.detect.outputs.aws_region }}   # <- use detected region
+      - run: terraform init -input=false
+      - run: terraform fmt -check
+      - run: terraform validate
+      - run: terraform plan -input=false
+
+  apply:
+    needs: detect
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    environment: production   # add required reviewers on this env
+    defaults:
+      run:
+        working-directory: ${{ needs.detect.outputs.project_path }}/infra
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
+          aws-region:     ${{ needs.detect.outputs.aws_region }}   # <- use detected region
+      - run: terraform init -input=false
+      - run: terraform apply -auto-approve -input=false
