@@ -1,4 +1,5 @@
 name: infra
+
 on:
   push:
     branches: ['**']
@@ -12,7 +13,14 @@ on:
         required: false
         type: string
 
-permissions: { id-token: write, contents: write, pull-requests: read }
+permissions:
+  id-token: write
+  contents: write        # needed for POST /dispatches
+  pull-requests: read    # detect job reads PR files via API
+
+concurrency:
+  group: infra-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   detect:
@@ -22,7 +30,8 @@ jobs:
       aws_region:  ${{ steps.region.outputs.region }}
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+        with:
+          fetch-depth: 0
 
       - id: detect
         shell: bash
@@ -41,11 +50,17 @@ jobs:
             PR_NUM="${{ github.event.pull_request.number }}"
             REPO="${{ github.repository }}"   # owner/repo
             TOKEN="${{ github.token }}"
-            FILES="$(curl -fsS \
-              -H "Authorization: Bearer $TOKEN" \
-              -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/$REPO/pulls/$PR_NUM/files?per_page=100" \
-              | jq -r '.[].filename')"
+            PAGE=1
+            while :; do
+              RESP="$(curl -fsS \
+                -H "Authorization: Bearer $TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/$REPO/pulls/$PR_NUM/files?per_page=100&page=$PAGE")"
+              CHUNK="$(echo "$RESP" | jq -r '.[].filename')"
+              [[ -z "$CHUNK" ]] && break
+              FILES+=$'\n'"$CHUNK"
+              ((PAGE++))
+            done
           else
             # 2) Push path: diff before...sha locally
             RANGE="${{ github.event.before }}...${{ github.sha }}"
@@ -74,6 +89,7 @@ jobs:
           FILE="$APP_DIR/infra/env/terraform.tfvars"
           REG=""
           if [[ -f "$FILE" ]]; then
+            # grabs: aws_region = "us-east-1"
             REG=$(awk -F= '/^\s*aws_region\s*=/{gsub(/[[:space:]"]/, "", $2); print $2}' "$FILE" | tail -n1)
           fi
           echo "region=${REG:-us-east-1}" >> "$GITHUB_OUTPUT"
@@ -91,7 +107,7 @@ jobs:
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
-          aws-region:     ${{ needs.detect.outputs.aws_region }}   # <- use detected region
+          aws-region:     ${{ needs.detect.outputs.aws_region }}
       - run: terraform init -input=false
       - run: terraform fmt -check
       - run: terraform validate
@@ -111,9 +127,21 @@ jobs:
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
-          aws-region:     ${{ needs.detect.outputs.aws_region }}   # <- use detected region
+          aws-region:     ${{ needs.detect.outputs.aws_region }}
       - run: terraform init -input=false
       - run: terraform apply -auto-approve -input=false -var-file=env/terraform.tfvars
+
+      # Read outputs now (local state on this runner), then dispatch to deploy-site with payload
+      - name: Read TF outputs (bucket & dist)
+        id: tfout
+        shell: bash
+        run: |
+          set -euo pipefail
+          terraform output -json > tf_outputs.json || true
+          BUCKET=$(jq -r '.bucket_name.value // empty' tf_outputs.json)
+          DIST=$(jq -r '.cloudfront_distribution.value // empty' tf_outputs.json)
+          echo "bucket=$BUCKET" >> "$GITHUB_OUTPUT"
+          echo "dist=$DIST"     >> "$GITHUB_OUTPUT"
 
       - name: Trigger deploy-site
         if: success()
@@ -121,20 +149,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           OWNER: ${{ github.repository_owner }}
           REPO:  ${{ github.event.repository.name }}
-          APP:   ${{ needs.detect.outputs.project_path }}
-          REGION:${{ needs.detect.outputs.aws_region }}
+        shell: bash
         run: |
           set -euo pipefail
+          payload=$(jq -n \
+            --arg app    "${{ needs.detect.outputs.project_path }}" \
+            --arg region "${{ needs.detect.outputs.aws_region }}" \
+            --arg bucket "${{ steps.tfout.outputs.bucket }}" \
+            --arg dist   "${{ steps.tfout.outputs.dist }}" \
+            '{event_type:"deploy_site",
+              client_payload:{project_path:$app, aws_region:$region,
+                              bucket_name:$bucket, cloudfront_distribution:$dist}}')
+
           curl -fsS -X POST \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/$OWNER/$REPO/dispatches" \
-            -d @- <<'JSON'
-          {
-            "event_type": "deploy_site",
-            "client_payload": {
-              "project_path": "${APP}",
-              "aws_region": "${REGION}"
-            }
-          }
-      JSON
+            -d "$payload"

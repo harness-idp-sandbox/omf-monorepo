@@ -105,42 +105,43 @@ jobs:
           role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
           aws-region:     ${{ needs.detect.outputs.aws_region }}
 
-      # === If you have a remote backend set up, uncomment this block and remove the read-only init below ===
-      # - name: Terraform init (read remote state)
-      #   working-directory: ${{ needs.detect.outputs.project_path }}/infra
-      #   run: |
-      #     terraform init -input=false \
-      #       -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
-      #       -backend-config="key=${{ needs.detect.outputs.project_path }}/terraform.tfstate" \
-      #       -backend-config="region=${{ secrets.TF_STATE_REGION || needs.detect.outputs.aws_region }}" \
-      #       -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}"
-
-      # Temporary local read-only init (works only if state is local in repo; otherwise outputs will be empty)
-      - name: Terraform init (read-only)
-        working-directory: ${{ needs.detect.outputs.project_path }}/infra
-        run: terraform init -backend=false -input=false
-
-      - name: Read outputs (guard)
-        id: tfout
+      # Resolve bucket (prefer payload from infra dispatch, fallback to local TF output)
+      - name: Resolve bucket
+        id: bucket
         working-directory: ${{ needs.detect.outputs.project_path }}/infra
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "${{ github.event_name }}" == "repository_dispatch" && -n "${{ github.event.client_payload.bucket_name }}" ]]; then
+            echo "bucket=${{ github.event.client_payload.bucket_name }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Fallback: try local state (works only if state is present locally)
+          terraform init -backend=false -input=false
           BUCKET="$(terraform output -raw bucket_name 2>/dev/null || true)"
           if [[ -z "$BUCKET" ]]; then
-            echo "::error::No 'bucket_name' output. Infra may not be applied yet or state is unreachable. If you use remote state, enable the remote init block."
+            echo "::error::No 'bucket_name' available. This job expects a repository_dispatch payload from infra, or a remote backend."
             exit 2
           fi
           echo "bucket=$BUCKET" >> "$GITHUB_OUTPUT"
 
       - name: Sync to S3
-        run: aws s3 sync site/ "s3://${{ steps.tfout.outputs.bucket }}" --delete
+        run: aws s3 sync site/ "s3://${{ steps.bucket.outputs.bucket }}" --delete
 
       - name: Invalidate CloudFront (if available)
+        working-directory: ${{ needs.detect.outputs.project_path }}/infra
+        shell: bash
         run: |
           set -euo pipefail
-          if DIST=$(cd infra && terraform output -raw cloudfront_distribution 2>/dev/null); then
+          if [[ "${{ github.event_name }}" == "repository_dispatch" && -n "${{ github.event.client_payload.cloudfront_distribution }}" ]]; then
+            DIST="${{ github.event.client_payload.cloudfront_distribution }}"
+          else
+            terraform init -backend=false -input=false >/dev/null 2>&1 || true
+            DIST="$(terraform output -raw cloudfront_distribution 2>/dev/null || true)"
+          fi
+
+          if [[ -n "$DIST" ]]; then
             aws cloudfront create-invalidation --distribution-id "$DIST" --paths "/*"
           else
-            echo "No cloudfront_distribution output; skipping invalidation."
+            echo "No CloudFront distribution provided; skipping invalidation."
           fi
