@@ -3,11 +3,6 @@ name: deploy-site
 on:
   repository_dispatch:
     types: [deploy_site]
-  push:
-    branches: [ main ]
-    paths:
-      - '**/site/**'
-      - '.github/workflows/deploy-site.yml'
   workflow_dispatch:
     inputs:
       project_path:
@@ -39,10 +34,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          # 0) Manual override
-          if [[ -n "${{ inputs.project_path || '' }}" ]]; then
-            echo "project_path=${{ inputs.project_path }}" >> "$GITHUB_OUTPUT"
-            exit 0
+          # 0) Manual override on workflow_dispatch
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            if [[ -n "${{ inputs.project_path || '' }}" ]]; then
+              echo "project_path=${{ inputs.project_path }}" >> "$GITHUB_OUTPUT"
+              exit 0
+            else
+              echo "::error::Please provide 'project_path' when manually dispatching."
+              exit 1
+            fi
           fi
 
           # 1) repository_dispatch fast-path from infra.yml
@@ -52,21 +52,9 @@ jobs:
             exit 0
           fi
 
-          # 2) Push path: diff before...sha locally
-          RANGE="${{ github.event.before }}...${{ github.sha }}"
-          FILES="$(git diff --name-only "$RANGE")"
-
-          # 3) Derive the app folder that contains site/
-          APPS="$(echo "$FILES" | awk -F/ '($2=="site"){print $1}' | sort -u)"
-          N=$(echo "$APPS" | grep -c . || true)
-          if [[ $N -eq 0 ]]; then
-            echo "No site changes detected"; exit 1
-          elif [[ $N -gt 1 ]]; then
-            echo "Multiple apps changed: $APPS"; exit 1
-          fi
-
-          echo "project_path=$(echo "$APPS")" >> "$GITHUB_OUTPUT"
-          echo "Detected app: $APPS"
+          # (No push trigger anymore; nothing else to detect)
+          echo "::error::Unsupported trigger for detect phase."
+          exit 1
 
       - name: Read region (dispatch payload or tfvars)
         id: region
@@ -80,7 +68,7 @@ jobs:
             echo "region=${{ github.event.client_payload.aws_region }}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # Fallback to tfvars in repo
+          # Fallback to tfvars in repo (for workflow_dispatch)
           FILE="$APP_DIR/infra/env/terraform.tfvars"
           REG=""
           if [[ -f "$FILE" ]]; then
