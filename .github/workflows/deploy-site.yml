@@ -14,7 +14,7 @@ permissions:
   id-token: write
   contents: read
 
-# Separate concurrency per ref or per dispatched app
+# Separate concurrency per dispatched app (or ref fallback)
 concurrency:
   group: deploy-site-${{ github.workflow }}-${{ github.event.client_payload.project_path || github.ref || 'na' }}
   cancel-in-progress: false
@@ -25,6 +25,7 @@ jobs:
     outputs:
       project_path: ${{ steps.detect.outputs.project_path }}
       aws_region:  ${{ steps.region.outputs.region }}
+      app_url:     ${{ steps.url.outputs.app_url }}
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
@@ -34,7 +35,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # 0) Manual override on workflow_dispatch
+          # 0) Manual run must provide project_path
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             if [[ -n "${{ inputs.project_path || '' }}" ]]; then
               echo "project_path=${{ inputs.project_path }}" >> "$GITHUB_OUTPUT"
@@ -45,14 +46,13 @@ jobs:
             fi
           fi
 
-          # 1) repository_dispatch fast-path from infra.yml
+          # 1) repository_dispatch (preferred)
           if [[ "${{ github.event_name }}" == "repository_dispatch" && "${{ github.event.action }}" == "deploy_site" ]]; then
             echo "project_path=${{ github.event.client_payload.project_path }}" >> "$GITHUB_OUTPUT"
             echo "Detected app (dispatch): ${{ github.event.client_payload.project_path }}"
             exit 0
           fi
 
-          # (No push trigger anymore; nothing else to detect)
           echo "::error::Unsupported trigger for detect phase."
           exit 1
 
@@ -63,12 +63,10 @@ jobs:
           APP_DIR: ${{ steps.detect.outputs.project_path }}
         run: |
           set -euo pipefail
-          # Prefer region from dispatch payload
           if [[ "${{ github.event_name }}" == "repository_dispatch" && -n "${{ github.event.client_payload.aws_region }}" ]]; then
             echo "region=${{ github.event.client_payload.aws_region }}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # Fallback to tfvars in repo (for workflow_dispatch)
           FILE="$APP_DIR/infra/env/terraform.tfvars"
           REG=""
           if [[ -f "$FILE" ]]; then
@@ -76,10 +74,36 @@ jobs:
           fi
           echo "region=${REG:-us-east-1}" >> "$GITHUB_OUTPUT"
 
+      - name: Compute app URL
+        id: url
+        shell: bash
+        env:
+          APP_DIR: ${{ steps.detect.outputs.project_path }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "repository_dispatch" && -n "${{ github.event.client_payload.cloudfront_domain }}" ]]; then
+            echo "app_url=https://${{ github.event.client_payload.cloudfront_domain }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Fallback for manual runs: try local state in repo
+          if [[ -d "$APP_DIR/infra" ]]; then
+            pushd "$APP_DIR/infra" >/dev/null
+            terraform init -backend=false -input=false >/dev/null 2>&1 || true
+            DOMAIN="$(terraform output -raw cloudfront_domain 2>/dev/null || true)"
+            popd >/dev/null
+            if [[ -n "$DOMAIN" ]]; then
+              echo "app_url=https://$DOMAIN" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          echo "app_url=" >> "$GITHUB_OUTPUT"  # empty; summary step will warn
+
   deploy:
     needs: detect
     runs-on: ubuntu-latest
-    environment: production
+    environment:
+      name: production
+      url:  ${{ needs.detect.outputs.app_url }}
     defaults:
       run:
         working-directory: ${{ needs.detect.outputs.project_path }}
@@ -93,7 +117,6 @@ jobs:
           role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
           aws-region:     ${{ needs.detect.outputs.aws_region }}
 
-      # Resolve bucket (prefer payload from infra dispatch, fallback to local TF output)
       - name: Resolve bucket
         id: bucket
         working-directory: ${{ needs.detect.outputs.project_path }}/infra
@@ -104,8 +127,7 @@ jobs:
             echo "bucket=${{ github.event.client_payload.bucket_name }}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # Fallback: try local state (works only if state is present locally)
-          terraform init -backend=false -input=false
+          terraform init -backend=false -input=false >/dev/null 2>&1 || true
           BUCKET="$(terraform output -raw bucket_name 2>/dev/null || true)"
           if [[ -z "$BUCKET" ]]; then
             echo "::error::No 'bucket_name' available. This job expects a repository_dispatch payload from infra, or a remote backend."
@@ -127,9 +149,27 @@ jobs:
             terraform init -backend=false -input=false >/dev/null 2>&1 || true
             DIST="$(terraform output -raw cloudfront_distribution 2>/dev/null || true)"
           fi
-
           if [[ -n "$DIST" ]]; then
             aws cloudfront create-invalidation --distribution-id "$DIST" --paths "/*"
           else
             echo "No CloudFront distribution provided; skipping invalidation."
           fi
+
+      - name: Post deployment summary
+        shell: bash
+        run: |
+          URL="${{ needs.detect.outputs.app_url }}"
+          if [[ -z "$URL" ]]; then
+            echo "::warning::No site URL available (infra not applied or state unavailable)."
+          fi
+          {
+            echo "## 🚀 Deployed static site"
+            echo ""
+            echo "- **App:** \`${{ needs.detect.outputs.project_path }}\`"
+            echo "- **Region:** \`${{ needs.detect.outputs.aws_region }}\`"
+            if [[ -n "$URL" ]]; then
+              echo "- **URL:** $URL"
+              echo ""
+              echo "[Open site]($URL)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

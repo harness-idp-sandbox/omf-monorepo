@@ -16,7 +16,7 @@ on:
 permissions:
   id-token: write
   contents: write        # needed for POST /dispatches
-  pull-requests: read    # detect job reads PR files via API
+  pull-requests: read    # PR file list in detect
 
 concurrency:
   group: infra-${{ github.workflow }}-${{ github.ref }}
@@ -30,8 +30,7 @@ jobs:
       aws_region:  ${{ steps.region.outputs.region }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+        with: { fetch-depth: 0 }
 
       - id: detect
         shell: bash
@@ -46,9 +45,9 @@ jobs:
 
           FILES=""
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            # 1) PR path: use GitHub API to list changed files (avoids merge-base issues)
+            # 1) PR path: list changed files (handle pagination)
             PR_NUM="${{ github.event.pull_request.number }}"
-            REPO="${{ github.repository }}"   # owner/repo
+            REPO="${{ github.repository }}"
             TOKEN="${{ github.token }}"
             PAGE=1
             while :; do
@@ -67,7 +66,7 @@ jobs:
             FILES="$(git diff --name-only "$RANGE")"
           fi
 
-          # 3) Derive the app folder that contains infra/
+          # 3) Derive app folder(s) that contain infra/
           APPS="$(echo "$FILES" | awk -F/ '($2=="infra"){print $1}' | sort -u)"
           N=$(echo "$APPS" | grep -c . || true)
           if [[ $N -eq 0 ]]; then
@@ -89,7 +88,6 @@ jobs:
           FILE="$APP_DIR/infra/env/terraform.tfvars"
           REG=""
           if [[ -f "$FILE" ]]; then
-            # grabs: aws_region = "us-east-1"
             REG=$(awk -F= '/^\s*aws_region\s*=/{gsub(/[[:space:]"]/, "", $2); print $2}' "$FILE" | tail -n1)
           fi
           echo "region=${REG:-us-east-1}" >> "$GITHUB_OUTPUT"
@@ -117,7 +115,7 @@ jobs:
     needs: detect
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
-    environment: production   # add required reviewers on this env
+    environment: production
     defaults:
       run:
         working-directory: ${{ needs.detect.outputs.project_path }}/infra
@@ -131,8 +129,7 @@ jobs:
       - run: terraform init -input=false
       - run: terraform apply -auto-approve -input=false -var-file=env/terraform.tfvars
 
-      # Read outputs now (local state on this runner), then dispatch to deploy-site with payload
-      - name: Read TF outputs (bucket & dist)
+      - name: Read TF outputs (bucket, dist, domain)
         id: tfout
         shell: bash
         run: |
@@ -140,8 +137,10 @@ jobs:
           terraform output -json > tf_outputs.json || true
           BUCKET=$(jq -r '.bucket_name.value // empty' tf_outputs.json)
           DIST=$(jq -r '.cloudfront_distribution.value // empty' tf_outputs.json)
+          DOMAIN=$(jq -r '.cloudfront_domain.value // empty' tf_outputs.json)
           echo "bucket=$BUCKET" >> "$GITHUB_OUTPUT"
           echo "dist=$DIST"     >> "$GITHUB_OUTPUT"
+          echo "domain=$DOMAIN" >> "$GITHUB_OUTPUT"
 
       - name: Trigger deploy-site
         if: success()
@@ -157,10 +156,11 @@ jobs:
             --arg region "${{ needs.detect.outputs.aws_region }}" \
             --arg bucket "${{ steps.tfout.outputs.bucket }}" \
             --arg dist   "${{ steps.tfout.outputs.dist }}" \
+            --arg domain "${{ steps.tfout.outputs.domain }}" \
             '{event_type:"deploy_site",
               client_payload:{project_path:$app, aws_region:$region,
-                              bucket_name:$bucket, cloudfront_distribution:$dist}}')
-
+                              bucket_name:$bucket, cloudfront_distribution:$dist,
+                              cloudfront_domain:$domain}}')
           curl -fsS -X POST \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
