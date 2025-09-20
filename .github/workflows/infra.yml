@@ -1,3 +1,4 @@
+# infra.yml
 name: infra
 
 on:
@@ -187,8 +188,21 @@ jobs:
           echo "bucket=$BUCKET" >> "$GITHUB_OUTPUT"
           echo "dist=$DIST"     >> "$GITHUB_OUTPUT"
           echo "domain=$DOMAIN" >> "$GITHUB_OUTPUT"
-
+      - name: Show site URL
+        if: ${{ steps.tfout.outputs.domain != '' }}
+        shell: bash
+        run: |
+          URL="https://${{ steps.tfout.outputs.domain }}"
+          echo "::notice::Site URL: ${URL}"
+          {
+            echo "### 🌐 Deployed site"
+            echo ""
+            echo "- **Bucket:** \`${{ steps.tfout.outputs.bucket }}\`"
+            echo "- **CloudFront ID:** \`${{ steps.tfout.outputs.dist }}\`"
+            echo "- **URL:** [${URL}](${URL})"
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Trigger deploy-site
+        if: ${{ success() && steps.tfout.outputs.domain != '' }}
         if: success()
         env:
           GH_TOKEN: ${{ github.token }}

@@ -1,3 +1,4 @@
+# deploy-site.yml
 name: deploy-site
 
 on:
@@ -77,27 +78,15 @@ jobs:
       - name: Compute app URL
         id: url
         shell: bash
-        env:
-          APP_DIR: ${{ steps.detect.outputs.project_path }}
         run: |
           set -euo pipefail
+          # Prefer explicit domain from dispatch payload
           if [[ "${{ github.event_name }}" == "repository_dispatch" && -n "${{ github.event.client_payload.cloudfront_domain }}" ]]; then
             echo "app_url=https://${{ github.event.client_payload.cloudfront_domain }}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # Fallback for manual runs: try local state in repo
-          if [[ -d "$APP_DIR/infra" ]]; then
-            pushd "$APP_DIR/infra" >/dev/null
-            terraform init -backend=false -input=false >/dev/null 2>&1 || true
-            DOMAIN="$(terraform output -raw cloudfront_domain 2>/dev/null || true)"
-            popd >/dev/null
-            if [[ -n "$DOMAIN" ]]; then
-              echo "app_url=https://$DOMAIN" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          fi
-          echo "app_url=" >> "$GITHUB_OUTPUT"  # empty; summary step will warn
-
+          # Otherwise leave empty; we'll try to compute it in the deploy job
+          echo "app_url=" >> "$GITHUB_OUTPUT"
   deploy:
     needs: detect
     runs-on: ubuntu-latest
@@ -154,11 +143,22 @@ jobs:
           else
             echo "No CloudFront distribution provided; skipping invalidation."
           fi
-
+      - name: Ensure app URL (derive from distribution if needed)
+        id: ensure_url
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="${{ needs.detect.outputs.app_url }}"
+          if [[ -z "$URL" && "${{ github.event.client_payload.cloudfront_distribution }}" != "" ]]; then
+            DIST="${{ github.event.client_payload.cloudfront_distribution }}"
+            DOMAIN="$(aws cloudfront get-distribution --id "$DIST" --query 'Distribution.DomainName' --output text)"
+            [[ "$DOMAIN" != "None" && -n "$DOMAIN" ]] && URL="https://$DOMAIN"
+          fi
+          echo "app_url=$URL" >> "$GITHUB_OUTPUT"
       - name: Post deployment summary
         shell: bash
         run: |
-          URL="${{ needs.detect.outputs.app_url }}"
+          URL="${{ steps.ensure_url.outputs.app_url }}"
           if [[ -z "$URL" ]]; then
             echo "::warning::No site URL available (infra not applied or state unavailable)."
           fi
@@ -173,3 +173,16 @@ jobs:
               echo "[Open site]($URL)"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Show deploy info (dispatch payload)
+        if: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.cloudfront_domain != '' }}
+        run: |
+          APP="${{ github.event.client_payload.project_path }}"
+          DOMAIN="${{ github.event.client_payload.cloudfront_domain }}"
+          URL="https://${DOMAIN}"
+          {
+            echo "### 🚀 Deployed ${APP}"
+            echo "- **URL:** [${URL}](${URL})"
+            echo "- **Bucket:** \`${{ github.event.client_payload.bucket_name }}\`"
+            echo "- **CloudFront ID:** \`${{ github.event.client_payload.cloudfront_distribution }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
