@@ -203,7 +203,6 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Trigger deploy-site
         if: ${{ success() && steps.tfout.outputs.domain != '' }}
-        if: success()
         env:
           GH_TOKEN: ${{ github.token }}
           OWNER: ${{ github.repository_owner }}
