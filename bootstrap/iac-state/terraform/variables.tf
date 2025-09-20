@@ -7,7 +7,7 @@ variable "region" {
 variable "bucket_name_prefix" {
   description = "Prefix for the TF state bucket; a random suffix is added"
   type        = string
-  default     = "parson-tfstate"
+  default     = "harnesspov-tfstate"
 }
 
 variable "lock_table_name" {
@@ -39,6 +39,6 @@ variable "tags" {
   type        = map(string)
   default = {
     Project = "terraform-backend"
-    Owner   = "parson"
+    Owner   = "HarnessPOV"
   }
 }

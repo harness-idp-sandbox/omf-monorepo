@@ -37,7 +37,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # 0) allow manual override
+          # 0) manual override
           if [[ -n "${{ inputs.project_path || '' }}" ]]; then
             echo "project_path=${{ inputs.project_path }}" >> "$GITHUB_OUTPUT"
             exit 0
@@ -45,15 +45,12 @@ jobs:
 
           FILES=""
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            # 1) PR path: list changed files (handle pagination)
             PR_NUM="${{ github.event.pull_request.number }}"
             REPO="${{ github.repository }}"
             TOKEN="${{ github.token }}"
             PAGE=1
             while :; do
-              RESP="$(curl -fsS \
-                -H "Authorization: Bearer $TOKEN" \
-                -H "Accept: application/vnd.github+json" \
+              RESP="$(curl -fsS -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
                 "https://api.github.com/repos/$REPO/pulls/$PR_NUM/files?per_page=100&page=$PAGE")"
               CHUNK="$(echo "$RESP" | jq -r '.[].filename')"
               [[ -z "$CHUNK" ]] && break
@@ -61,23 +58,23 @@ jobs:
               ((PAGE++))
             done
           else
-            # 2) Push path: diff before...sha locally
             RANGE="${{ github.event.before }}...${{ github.sha }}"
             FILES="$(git diff --name-only "$RANGE")"
           fi
 
-          # 3) Derive app folder(s) that contain infra/
-          APPS="$(echo "$FILES" | awk -F/ '($2=="infra"){print $1}' | sort -u)"
+          # Extract app dir by stripping '/infra/...'
+          APPS="$(echo "$FILES" | awk 'match($0,/(.*)\/infra\/.*/,a){print a[1]}' | sort -u)"
           N=$(echo "$APPS" | grep -c . || true)
           if [[ $N -eq 0 ]]; then
-            echo "No infra changes detected"; exit 1
+            echo "::notice::No infra changes detected"
+            echo "project_path=" >> "$GITHUB_OUTPUT"
+            exit 0
           elif [[ $N -gt 1 ]]; then
-            echo "Multiple apps changed: $APPS"; exit 1
+            echo "::error::Multiple apps changed: $APPS"
+            exit 1
           fi
-
           echo "project_path=$(echo "$APPS")" >> "$GITHUB_OUTPUT"
           echo "Detected app: $APPS"
-
       - name: Read region from tfvars
         id: region
         shell: bash
@@ -94,7 +91,7 @@ jobs:
 
   plan:
     needs: detect
-    if: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
+    if: ${{ (github.event_name != 'push' || github.ref != 'refs/heads/main') && needs.detect.outputs.project_path != '' }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -106,14 +103,39 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
           aws-region:     ${{ needs.detect.outputs.aws_region }}
-      - run: terraform init -input=false
+      - name: Write backend.hcl (derive org/repo/env)
+        working-directory: ${{ needs.detect.outputs.project_path }}/infra
+        shell: bash
+        run: |
+          set -euo pipefail
+          ORG="${{ github.repository_owner }}"
+          REPO="${{ github.event.repository.name }}"
+          REF="${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}"
+          REF="${REF#refs/tags/}"
+          ENV="$REF"
+          [[ -z "$ENV" ]] && ENV="${{ github.ref_name }}"
+          [[ "$ENV" == "main" ]] && ENV="prod"
+          ENV="${ENV//\//-}"
+          APP="${{ needs.detect.outputs.project_path }}"
+          cat > backend.hcl <<EOF
+          bucket         = "${{ secrets.TFSTATE_BUCKET }}"
+          key            = "repos/${ORG}/${REPO}/${ENV}/${APP}/terraform.tfstate"
+          region         = "${{ secrets.AWS_REGION }}"
+          dynamodb_table = "${{ secrets.TF_LOCK_TABLE }}"
+          encrypt        = true
+          EOF
+          echo "Using state key: repos/${ORG}/${REPO}/${ENV}/${APP}/terraform.tfstate"
+
+      - name: Terraform init (remote backend)
+        working-directory: ${{ needs.detect.outputs.project_path }}/infra
+        run: terraform init -input=false -backend-config=backend.hcl -lock-timeout=3m
       - run: terraform fmt -check
       - run: terraform validate
-      - run: terraform plan -input=false -var-file=env/terraform.tfvars
+      - run: terraform plan -input=false -lock-timeout=3m -var-file=env/terraform.tfvars
 
   apply:
     needs: detect
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && needs.detect.outputs.project_path != '' }}
     runs-on: ubuntu-latest
     environment: production
     defaults:
@@ -126,9 +148,33 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
           aws-region:     ${{ needs.detect.outputs.aws_region }}
-      - run: terraform init -input=false
-      - run: terraform apply -auto-approve -input=false -var-file=env/terraform.tfvars
+      - name: Write backend.hcl (derive org/repo/env)
+        working-directory: ${{ needs.detect.outputs.project_path }}/infra
+        shell: bash
+        run: |
+          set -euo pipefail
+          ORG="${{ github.repository_owner }}"
+          REPO="${{ github.event.repository.name }}"
+          REF="${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}"
+          REF="${REF#refs/tags/}"
+          ENV="$REF"
+          [[ -z "$ENV" ]] && ENV="${{ github.ref_name }}"
+          [[ "$ENV" == "main" ]] && ENV="prod"
+          ENV="${ENV//\//-}"
+          APP="${{ needs.detect.outputs.project_path }}"
+          cat > backend.hcl <<EOF
+          bucket         = "${{ secrets.TFSTATE_BUCKET }}"
+          key            = "repos/${ORG}/${REPO}/${ENV}/${APP}/terraform.tfstate"
+          region         = "${{ secrets.AWS_REGION }}"
+          dynamodb_table = "${{ secrets.TF_LOCK_TABLE }}"
+          encrypt        = true
+          EOF
+          echo "Using state key: repos/${ORG}/${REPO}/${ENV}/${APP}/terraform.tfstate"
 
+      - name: Terraform init (remote backend)
+        working-directory: ${{ needs.detect.outputs.project_path }}/infra
+        run: terraform init -input=false -backend-config=backend.hcl -lock-timeout=3m
+      - run: terraform apply -auto-approve -input=false -lock-timeout=3m -var-file=env/terraform.tfvars
       - name: Read TF outputs (bucket, dist, domain)
         id: tfout
         shell: bash

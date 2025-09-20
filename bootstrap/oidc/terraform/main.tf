@@ -1,14 +1,3 @@
-terraform {
-  required_version = ">= 1.6"
-  required_providers {
-    aws = { source = "hashicorp/aws", version = "~> 5.0" }
-  }
-}
-
-provider "aws" {
-  region = var.region
-}
-
 # Create GitHub OIDC provider if your account doesn't have it yet
 # Thumbprints are managed by AWS provider; update if ever needed.
 resource "aws_iam_openid_connect_provider" "github" {

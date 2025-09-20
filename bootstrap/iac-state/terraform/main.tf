@@ -70,13 +70,23 @@ resource "aws_s3_bucket_lifecycle_configuration" "tfstate" {
   rule {
     id     = "abort-mpu"
     status = "Enabled"
-    abort_incomplete_multipart_upload { days_after_initiation = 7 }
+
+    filter {} # applies to whole bucket
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
   }
 
   rule {
     id     = "noncurrent-trim"
     status = "Enabled"
-    noncurrent_version_expiration { noncurrent_days = 90 }
+
+    filter {} # applies to whole bucket
+
+    noncurrent_version_expiration {
+      noncurrent_days = 90
+    }
   }
 }
 
@@ -85,9 +95,21 @@ data "aws_iam_policy_document" "bucket" {
     sid     = "DenyInsecureTransport"
     effect  = "Deny"
     actions = ["s3:*"]
-    principals { type = "AWS", identifiers = ["*"] }
-    resources = [aws_s3_bucket.tfstate.arn, "${aws_s3_bucket.tfstate.arn}/*"]
-    condition { test = "Bool", variable = "aws:SecureTransport", values = ["false"] }
+
+    principals {
+      type        = "AWS"
+      identifiers = ["*"]
+    }
+
+    resources = [
+      aws_s3_bucket.tfstate.arn,
+      "${aws_s3_bucket.tfstate.arn}/*"
+    ]
+    condition {
+      test     = "Bool"
+      variable = "aws:SecureTransport"
+      values   = ["false"]
+    }
   }
 }
 
@@ -99,10 +121,13 @@ resource "aws_s3_bucket_policy" "tfstate" {
 # DynamoDB table for state locking
 resource "aws_dynamodb_table" "locks" {
   name         = var.lock_table_name
-  billing_mode = "PAYPERREQUEST"
+  billing_mode = "PAY_PER_REQUEST"
   hash_key     = "LockID"
+  attribute {
+    name = "LockID"
+    type = "S"
+  }
 
-  attribute { name = "LockID"; type = "S" }
   tags = var.tags
 }
 
