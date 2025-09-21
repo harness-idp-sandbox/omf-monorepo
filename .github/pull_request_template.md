@@ -10,8 +10,6 @@ Please explain the purpose of this PR and the changes introduced.
 `idp` `automation` `scaffold` `change-mgmt` `security` `docs`
 
 ## 👤 Requestor
-- **Name**: ${{ inputs.requestor_name }}
-- **Email**: ${{ inputs.requestor_email }}
 - **GitHub Username**: ${{ inputs.github_username || 'N/A' }}
 
 ## ✅ Checklist
