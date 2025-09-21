@@ -1,0 +1,11 @@
+# Default owners for the entire monorepo
+/ @ORG/platform-team
+
+# Workflows, infra, and shared config
+/.github/ @ORG/platform-team
+/infra/   @ORG/platform-team
+/libs/    @ORG/platform-team
+
+# App folders will be appended here by scaffolding
+# Example (added by cookiecutter scaffold):
+# /apps/todd-test-three/ @ORG/team-todd
