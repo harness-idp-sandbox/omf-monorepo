@@ -1,11 +1,9 @@
 # Default owners for the entire monorepo
-/ @ORG/platform-team
+/ @harness-idp-sandbox/platform-team
 
 # Workflows, infra, and shared config
-/.github/ @ORG/platform-team
-/infra/   @ORG/platform-team
-/libs/    @ORG/platform-team
+/.github/ @harness-idp-sandbox/platform-team
+/infra/   @harness-idp-sandbox/platform-team
+/libs/    @harness-idp-sandbox/platform-team
 
-# App folders will be appended here by scaffolding
-# Example (added by cookiecutter scaffold):
-# /apps/todd-test-three/ @ORG/team-todd
+# <<APP-OWNERS>>
