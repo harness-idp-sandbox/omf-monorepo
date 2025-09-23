@@ -1,0 +1,27 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: todd-test-one
+  description: Testing for POC
+  annotations:
+    backstage.io/techdocs-ref: dir:.
+    github.com/project-slug: harness-idp-sandbox/monorepo-idp-example
+  tags:
+    - react
+    - monorepo
+    - idp
+    - dev
+  links:
+    - url: https://github.com/harness-idp-sandbox/monorepo-idp-example.git
+      title: Source repository
+      icon: github
+    - url: https://github.com/harness-idp-sandbox/monorepo-idp-example/tree/feature/todd-test-one-65
+      title: Feature branch
+      icon: link
+    - url: https://app.harness.io/ng/#/account/EeRjnXTnS4GrLG5VNNJZUw/idp-admin/orgs/sandbox/projects/parson/pipelines/E2E_React_App_Provisioning/executions/sUStmG23ST2cj49o6mhimA/pipeline
+      title: Pipeline execution
+      icon: build
+spec:
+  type: service
+  owner: todd.parson@harness.io
+  lifecycle: experimental
