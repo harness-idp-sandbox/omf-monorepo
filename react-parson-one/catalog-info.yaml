@@ -1,0 +1,57 @@
+# Cookiecutter-rendered catalog definition for Harness IDP 2.0
+# Docs: IDP 2.0 entity schema & fields (identifier/name/type/owner). TechDocs annotation. 
+# - https://developer.harness.io/docs/internal-developer-portal/catalog/catalog-yaml/
+# - https://developer.harness.io/docs/internal-developer-portal/techdocs/enable-docs/
+
+apiVersion: harness.io/v1
+kind: Component
+
+# Machine-friendly unique key for this entity (IDP 2.0 uses `identifier`)
+identifier: react-parson-one
+
+# Human display name
+name: React Parson One
+
+# Choose a type taxonomy you like (common: service | website | library)
+type: website
+
+# Owner can be a user or group. For a user email at account scope:
+#   user:account/<email>
+# If you maintain IDP Groups, switch to: group:<groupIdentifier>
+owner: user:account/todd.parson@harness.io
+
+# Optional: set org/project scope if you want to bind this to specific Harness scopes.
+# Remove if you prefer account scope.
+# orgIdentifier: default
+# projectIdentifier: Reference_Architecture
+
+metadata:
+  description: Testing for POC
+  annotations:
+    # TechDocs source (dir:. means “use this repo/folder”)
+    backstage.io/techdocs-ref: dir:.
+
+    # GitHub project slug for plugins that expect it
+    github.com/project-slug: harness-idp-sandbox/monorepo-idp-example
+
+    # Where the source lives (monorepo-friendly; adjust branch if needed)
+    backstage.io/source-location: >-
+      url:https://github.com/harness-idp-sandbox/monorepo-idp-example/tree/main/react-parson-one
+
+  links:
+    - title: Source repository
+      url: https://github.com/harness-idp-sandbox/monorepo-idp-example
+    - title: App folder (monorepo)
+      url: https://github.com/harness-idp-sandbox/monorepo-idp-example/tree/main/react-parson-one
+
+  tags:
+    - react
+    - monorepo
+    - dev
+
+spec:
+  # Keep spec minimal; lifecycle is commonly used
+  lifecycle: experimental
+  # If you have dependencies, you can add:
+  # dependsOn:
+  #   - component:some-backend
