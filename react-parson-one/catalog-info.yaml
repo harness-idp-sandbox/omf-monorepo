@@ -13,13 +13,15 @@ identifier: react-parson-one
 name: React Parson One
 
 # Common types: service | website | library
-type: website
+type: service
 
 # Owner can be user or group (e.g., group:platform-team)
 owner: user:account/todd.parson@harness.io
+scope: PROJECT
+projectIdentifier: parson
+orgIdentifier: sandbox
 
 metadata:
-  namespace: default
   description: Testing for POC
   annotations:
     # TechDocs looks for mkdocs.yml in this folder
@@ -45,6 +47,13 @@ metadata:
 
 spec:
   lifecycle: experimental
+  sourceCode:
+    provider: Github
+    repoName: monorepo-idp-example
+    connectorRef: parsonghharnessidpsandbox
+    branch: main
+    monoRepo: true
+    monoRepoSubDirectoryPath: react-parson-one
   # Add relationships later if/when they exist:
   # dependsOn:
   #   - component:default/some-backend
