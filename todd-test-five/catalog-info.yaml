@@ -28,6 +28,7 @@ metadata:
 
     # Helpful for plugins/deeplinks
     github.com/project-slug: harness-idp-sandbox/monorepo-idp-example
+    github.com/project-readme-path: todd-test-five/README.md
 
     # Optional direct link to this app folder on default branch
     backstage.io/source-location: >-
