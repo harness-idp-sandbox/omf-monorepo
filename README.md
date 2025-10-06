@@ -83,7 +83,51 @@ npm run dev   # open http://localhost:5173
 - **Main branch merges:** Trigger build/deploy workflows for each app.  
 - **Change management:** Jira/ServiceNow approvals may gate production deploys.
 
+
 ---
+
+## 🧩 GitHub Actions Workflows and Automated Triggers
+
+The **GitHub Actions workflows** in this monorepo provide continuous integration, infrastructure automation, and optional IDP catalog registration for each app created via the **IDP Provisioning pipeline**.
+
+### Overview
+
+When a new app folder is scaffolded and pushed to a feature branch:
+- The workflows automatically detect the new folder via **path filters** (no manual setup required).  
+- Each workflow runs only for the relevant app’s files (isolated CI).  
+- Once the PR is merged, the same workflows handle production apply and registration.
+
+### Workflow Breakdown
+
+| Workflow File | Trigger | Purpose |
+|----------------|----------|----------|
+| **`.github/workflows/react-ci.yml`** | `pull_request` touching `*/site/**` | Builds, lints, and tests the React app. Runs on all PRs that change files within the app’s `site/` folder. |
+| **`.github/workflows/terraform.yml`** | `pull_request` and `push` to `main` touching `*/infra/**` | Validates and plans Terraform on PRs. Applies infrastructure automatically after merge. Uses OIDC to assume cloud IAM roles. |
+| **`.github/workflows/idp-register.yml`** | `push` to `main` touching `*/catalog-info.yaml` | Registers or re-registers the new component with the Harness IDP / Backstage catalog via API. Optional, can be toggled off via repo secrets. |
+
+> Each workflow is written to operate on **any app folder** without modification.  
+> Path filters ensure that workflows are only triggered when files in the corresponding folder change.
+
+### Typical Lifecycle
+
+1. **Provisioning:**  
+   - Harness IDP pipeline (`E2E_React_App_Provisioning`) scaffolds a new app folder and opens a PR.
+2. **PR Validation:**  
+   - `react-ci.yml` and `terraform.yml` run automatically on the PR to validate code and infrastructure.
+3. **Merge to Main:**  
+   - On merge, `terraform.yml` applies infrastructure and (optionally) `idp-register.yml` imports the new catalog entry.
+4. **Visibility in IDP:**  
+   - Within minutes, the new app appears in the Harness IDP catalog, complete with metadata, ownership, and TechDocs.
+
+### Key Automation Principles
+
+- **Centralized CI:** Workflows live once in `.github/workflows/`, shared by all apps.
+- **Decoupled Template Logic:** The cookiecutter repo (`app-template-react-monorepo`) defines folder structure only; automation stays in this monorepo.
+- **No Manual Setup:** Developers don’t need to modify or add workflow files — everything runs automatically after scaffolding.
+- **Governance Ready:** Workflows can be extended to include SAST/SCA scans, approvals, and cost checks without affecting the template logic.
+
+---
+
 
 ## Example Workflows
 
@@ -99,4 +143,3 @@ npm run dev   # open http://localhost:5173
 - **Pipeline name:** `E2E_React_App_Provisioning`  
 - **Questions about setup:** Contact your Harness SE.  
 - **Day-to-day use:** Developers only need to use the IDP Provisioning flow and app-level README guidance.
-
