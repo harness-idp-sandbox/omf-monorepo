@@ -21,8 +21,8 @@ resource "aws_iam_role" "gha_oidc" {
 # Choose provider ARN (created or pre-existing)
 locals {
   # Split into two locals to avoid coalesce()
-  created_oidc_arn   = try(aws_iam_openid_connect_provider.github[0].arn, null)
-  existing_oidc_arn  = (
+  created_oidc_arn = try(aws_iam_openid_connect_provider.github[0].arn, null)
+  existing_oidc_arn = (
     var.existing_oidc_provider_arn != null && length(trimspace(var.existing_oidc_provider_arn)) > 0
     ? var.existing_oidc_provider_arn
     : null

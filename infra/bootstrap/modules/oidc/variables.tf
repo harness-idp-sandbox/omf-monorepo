@@ -24,7 +24,7 @@ Subjects allowed to assume the role. Examples:
 - "environment:dev"
 EOT
   type        = list(string)
-  default     = ["pull_request", "refs/heads/main"] # tweak as needed
+  default     = ["pull_request", "refs/heads/*"] # tweak as needed
 }
 
 variable "role_name" {
@@ -84,8 +84,10 @@ variable "lock_table_arn" {
 }
 
 variable "tags" {
-  type    = map(string)
-  default = {}
+  type = map(string)
+  default = {
+    Owner = "HarnessPOV"
+  }
 }
 
 variable "managed_policy_arns" {
