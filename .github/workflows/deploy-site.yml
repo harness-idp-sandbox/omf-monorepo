@@ -105,6 +105,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
           aws-region:     ${{ needs.detect.outputs.aws_region }}
+          role-skip-session-tagging: true
           role-session-name: deploy-site-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Verify site payload exists
