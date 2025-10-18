@@ -63,7 +63,7 @@ locals {
 # S3 bucket for Terraform remote state
 # -----------------------------------------
 resource "aws_s3_bucket" "tf" {
-  bucket        = local.bucket_name_effective
+  bucket = local.bucket_name_effective
 
   # Safety: keep OFF by default so you don't accidentally delete state objects.
   # To teardown quickly, temporarily set this to true and remove prevent_destroy.
@@ -107,7 +107,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "tf" {
 
   rule {
     apply_server_side_encryption_by_default {
-      sse_algorithm     = var.use_kms && length(local.kms_key_arn_effective) > 0 ? "aws:kms" : "AES256"
+      sse_algorithm = var.use_kms && length(local.kms_key_arn_effective) > 0 ? "aws:kms" : "AES256"
       # Provider v5 uses kms_master_key_id on this resource
       kms_master_key_id = var.use_kms && length(local.kms_key_arn_effective) > 0 ? local.kms_key_arn_effective : null
     }

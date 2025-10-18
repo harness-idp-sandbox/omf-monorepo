@@ -66,20 +66,10 @@ data "aws_iam_policy_document" "assume_role" {
       variable = "token.actions.githubusercontent.com:sub"
       values   = local.subject_patterns
     }
-
-    # allow the specific session tag keys GHA v4 sets
     condition {
-      test     = "ForAllValues:StringEquals"
+      test     = "ForAllValues:StringLike"
       variable = "aws:TagKeys"
-      values = [
-        "GitHubActor",
-        "GitHubRepository",
-        "GitHubWorkflow",
-        "GitHubJob",
-        "GitHubRef",
-        "GitHubRunId",
-        "GitHubRunNumber",
-      ]
+      values   = ["GitHub*"]
     }
   }
 }

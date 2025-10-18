@@ -33,7 +33,7 @@ output "backend_access_policy_json" {
 # Handy template for backend.hcl that your repo workflows can fill in with an app-specific key
 output "backend_hcl_example" {
   description = "Example backend.hcl content for initializing Terraform with this backend."
-  value = <<EOT
+  value       = <<EOT
 bucket         = "${aws_s3_bucket.tf.bucket}"
 key            = "${var.state_key_prefix}/<app-path>/terraform.tfstate"
 region         = "${var.region}"
