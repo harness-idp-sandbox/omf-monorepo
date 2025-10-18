@@ -39,7 +39,8 @@ jobs:
           role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
           aws-region:     ${{ secrets.AWS_REGION }}
           role-skip-session-tagging: true
-          # (you can add) role-session-name: gha-${{ github.run_id }}-${{ github.run_attempt }}
+          role-session-name: gha-${{ github.run_id }}-${{ github.run_attempt }}
+
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
