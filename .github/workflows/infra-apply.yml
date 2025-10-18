@@ -1,4 +1,3 @@
-# infra-apply.yml
 name: infra-apply
 
 on:
@@ -32,43 +31,48 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          slug="$(basename "$PROJECT_PATH")"
-          echo "slug=$slug" >> "$GITHUB_OUTPUT"
+          echo "slug=$(basename "$PROJECT_PATH")" >> "$GITHUB_OUTPUT"
 
       - name: AWS Credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
-          aws-region: ${{ secrets.AWS_REGION }}
-          role-skip-session-tagging: true 
+          aws-region:     ${{ secrets.AWS_REGION }}
+          # (you can add) role-session-name: gha-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.9.x
 
-      - name: Write backend.hcl (derive org/repo/env)
+      - name: Derive ENV
+        id: env
+        shell: bash
+        run: |
+          REF="${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}"
+          REF="${REF#refs/tags/}"
+          ENV="${REF:-${GITHUB_REF_NAME}}"
+          [[ "$ENV" == "main" ]] && ENV="prod"
+          ENV="${ENV//\//-}"
+          echo "env=$ENV" >> "$GITHUB_OUTPUT"
+
+      - name: Write backend.hcl (use derived ENV)
         working-directory: ${{ env.PROJECT_PATH }}/infra
         shell: bash
         run: |
-            set -euo pipefail
-            ORG="${{ github.repository_owner }}"
-            REPO="${{ github.event.repository.name }}"
-            REF="${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}"
-            REF="${REF#refs/tags/}"
-            ENV="$REF"
-            [[ -z "$ENV" ]] && ENV="${{ github.ref_name }}"
-            [[ "$ENV" == "main" ]] && ENV="prod"
-            ENV="${ENV//\//-}"
-            APP="${{ env.PROJECT_PATH }}"
-            cat > backend.hcl <<EOF
-            bucket         = "${{ secrets.TFSTATE_BUCKET }}"
-            key            = "repos/${ORG}/${REPO}/${ENV}/${APP}/terraform.tfstate"
-            region         = "${{ secrets.AWS_REGION }}"
-            dynamodb_table = "${{ secrets.TF_LOCK_TABLE }}"
-            encrypt        = true
-            EOF
-            echo "Using state key: repos/${ORG}/${REPO}/${ENV}/${APP}/terraform.tfstate"
+          set -euo pipefail
+          ORG="${{ github.repository_owner }}"
+          REPO="${{ github.event.repository.name }}"
+          ENV="${{ steps.env.outputs.env }}"
+          APP="${{ env.PROJECT_PATH }}"
+          cat > backend.hcl <<EOF
+          bucket         = "${{ secrets.TFSTATE_BUCKET }}"
+          key            = "repos/${ORG}/${REPO}/${ENV}/${APP}/terraform.tfstate"
+          region         = "${{ secrets.AWS_REGION }}"
+          dynamodb_table = "${{ secrets.TF_LOCK_TABLE }}"
+          encrypt        = true
+          EOF
+          echo "Using state key: repos/${ORG}/${REPO}/${ENV}/${APP}/terraform.tfstate"
 
       - name: Terraform Init (remote backend)
         working-directory: ${{ env.PROJECT_PATH }}/infra
@@ -76,6 +80,37 @@ jobs:
 
       - name: Terraform Apply
         working-directory: ${{ env.PROJECT_PATH }}/infra
-        run: terraform apply -auto-approve -input=false -lock-timeout=3m -var-file=env/terraform.tfvars
+        run: terraform apply -auto-approve -input=false -lock-timeout=3m -var "environment=${{ steps.env.outputs.env }}" -var-file=env/terraform.tfvars
 
+      - name: Read TF outputs
+        id: tfout
+        working-directory: ${{ env.PROJECT_PATH }}/infra
+        shell: bash
+        run: |
+          set -euo pipefail
+          terraform output -json > tf_outputs.json || true
+          BUCKET=$(jq -r '.bucket_name.value // empty' tf_outputs.json)
+          DIST=$(jq -r '.cloudfront_distribution.value // empty' tf_outputs.json)
+          DOMAIN=$(jq -r '.cloudfront_domain.value // empty' tf_outputs.json)
+          echo "bucket=$BUCKET" >> "$GITHUB_OUTPUT"
+          echo "dist=$DIST"     >> "$GITHUB_OUTPUT"
+          echo "domain=$DOMAIN" >> "$GITHUB_OUTPUT"
 
+      - name: Summarize outputs
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### 🌐 Deployed site"
+            echo ""
+            [[ -n "${{ steps.tfout.outputs.bucket }}" ]] && echo "- **Bucket:** \`${{ steps.tfout.outputs.bucket }}\`"
+            [[ -n "${{ steps.tfout.outputs.dist }}"   ]] && echo "- **CloudFront ID:** \`${{ steps.tfout.outputs.dist }}\`"
+            [[ -n "${{ steps.tfout.outputs.domain }}" ]] && echo "- **URL:** https://${{ steps.tfout.outputs.domain }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Invalidate CloudFront
+        if: ${{ success() && steps.tfout.outputs.dist != '' }}
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id "${{ steps.tfout.outputs.dist }}" \
+            --paths "/*"

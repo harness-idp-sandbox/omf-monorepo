@@ -31,33 +31,39 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          slug="$(basename "$PROJECT_PATH")"
-          echo "slug=$slug" >> "$GITHUB_OUTPUT"
+          echo "slug=$(basename "$PROJECT_PATH")" >> "$GITHUB_OUTPUT"
 
       - name: AWS Credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region:     ${{ secrets.AWS_REGION }}
+          role-session-name: destroy-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.9.x
 
-      - name: Write backend.hcl (derive org/repo/env)
+      - name: Derive ENV
+        id: env
+        shell: bash
+        run: |
+          REF="${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}"
+          REF="${REF#refs/tags/}"
+          ENV="${REF:-${GITHUB_REF_NAME}}"
+          [[ "$ENV" == "main" ]] && ENV="prod"
+          ENV="${ENV//\//-}"
+          echo "env=$ENV" >> "$GITHUB_OUTPUT"
+
+      - name: Write backend.hcl (use derived ENV)
         working-directory: ${{ env.PROJECT_PATH }}/infra
         shell: bash
         run: |
           set -euo pipefail
           ORG="${{ github.repository_owner }}"
           REPO="${{ github.event.repository.name }}"
-          REF="${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}"
-          REF="${REF#refs/tags/}"
-          ENV="$REF"
-          [[ -z "$ENV" ]] && ENV="${{ github.ref_name }}"
-          [[ "$ENV" == "main" ]] && ENV="prod"
-          ENV="${ENV//\//-}"   # sanitize branch slashes
+          ENV="${{ steps.env.outputs.env }}"
           APP="${{ env.PROJECT_PATH }}"
           cat > backend.hcl <<EOF
           bucket         = "${{ secrets.TFSTATE_BUCKET }}"
@@ -72,10 +78,7 @@ jobs:
         working-directory: ${{ env.PROJECT_PATH }}/infra
         run: terraform init -input=false -backend-config=backend.hcl -lock-timeout=3m
 
-      - name: Terraform destroy
-        working-directory: ${{ env.PROJECT_PATH }}/infra
-        run: terraform destroy -auto-approve -input=false -lock-timeout=3m -var-file=env/terraform.tfvars
-
+      # ---- capture info BEFORE destroy so we can show/use it ----
       - name: Read TF outputs (pre-destroy)
         id: tfout
         working-directory: ${{ env.PROJECT_PATH }}/infra
@@ -89,19 +92,24 @@ jobs:
           echo "bucket=$BUCKET" >> "$GITHUB_OUTPUT"
           echo "dist=$DIST"     >> "$GITHUB_OUTPUT"
           echo "domain=$DOMAIN" >> "$GITHUB_OUTPUT"
-
-      - name: Show site URL (pre-destroy)
-        if: ${{ steps.tfout.outputs.domain != '' }}
-        shell: bash
-        run: |
-          URL="https://${{ steps.tfout.outputs.domain }}"
-          echo "::notice::Destroying site at ${URL}"
+          if [[ -n "$DOMAIN" ]]; then
+            echo "::notice::Destroying site at https://$DOMAIN"
+          fi
           {
             echo "### 🗑️ Destroying stack"
-            echo "- **Bucket:** \`${{ steps.tfout.outputs.bucket }}\`"
-            echo "- **CloudFront ID:** \`${{ steps.tfout.outputs.dist }}\`"
-            echo "- **URL:** [${URL}](${URL})"
+            [[ -n "$BUCKET" ]] && echo "- **Bucket:** \`$BUCKET\`"
+            [[ -n "$DIST"   ]] && echo "- **CloudFront ID:** \`$DIST\`"
+            [[ -n "$DOMAIN" ]] && echo "- **URL:** https://$DOMAIN"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # Optional: pre-destroy invalidation (not required; CloudFront will be deleted)
+      # - name: Invalidate CloudFront (optional pre-destroy)
+      #   if: ${{ steps.tfout.outputs.dist != '' }}
+      #   run: aws cloudfront create-invalidation --distribution-id "${{ steps.tfout.outputs.dist }}" --paths "/*"
+
+      - name: Terraform destroy
+        working-directory: ${{ env.PROJECT_PATH }}/infra
+        run: terraform destroy -auto-approve -input=false -lock-timeout=3m -var "environment=${{ steps.env.outputs.env }}" -var-file=env/terraform.tfvars
 
       # Optional: delete the state object after destroy (use only if you know the state is no longer needed)
       # - name: Delete state object from S3 (optional)
@@ -110,12 +118,7 @@ jobs:
       #     set -euo pipefail
       #     ORG="${{ github.repository_owner }}"
       #     REPO="${{ github.event.repository.name }}"
-      #     REF="${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}"
-      #     REF="${REF#refs/tags/}"
-      #     ENV="$REF"
-      #     [[ -z "$ENV" ]] && ENV="${{ github.ref_name }}"
-      #     [[ "$ENV" == "main" ]] && ENV="prod"
-      #     ENV="${ENV//\//-}"
+      #     ENV="${{ steps.env.outputs.env }}"
       #     APP="${{ env.PROJECT_PATH }}"
       #     KEY="repos/${ORG}/${REPO}/${ENV}/${APP}/terraform.tfstate"
       #     aws s3 rm "s3://${{ secrets.TFSTATE_BUCKET }}/${KEY}" --region "${{ secrets.AWS_REGION }}" || true
