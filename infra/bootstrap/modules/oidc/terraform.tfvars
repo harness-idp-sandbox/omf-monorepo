@@ -11,7 +11,8 @@ existing_oidc_provider_arn = "arn:aws:iam::759984737373:oidc-provider/token.acti
 allowed_subjects = [
   "pull_request",
   "refs/heads/*",
-  "refs/tags/*"
+  "refs/tags/*",
+  "environment:*"
 ]
 
 # IAM role settings

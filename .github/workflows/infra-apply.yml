@@ -10,7 +10,7 @@ on:
 
 permissions:
   id-token: write
-  contents: read
+  contents: write   # <-- needed for POST /dispatches
 
 jobs:
   apply:
@@ -40,7 +40,6 @@ jobs:
           aws-region:     ${{ secrets.AWS_REGION }}
           role-skip-session-tagging: true
           role-session-name: gha-${{ github.run_id }}-${{ github.run_attempt }}
-
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -116,3 +115,32 @@ jobs:
           aws cloudfront create-invalidation \
             --distribution-id "${{ steps.tfout.outputs.dist }}" \
             --paths "/*"
+
+      - name: Trigger deploy-site
+        if: ${{ success() && steps.tfout.outputs.domain != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          REPO:  ${{ github.event.repository.name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          payload=$(jq -n \
+            --arg app    "${{ env.PROJECT_PATH }}" \
+            --arg region "${{ secrets.AWS_REGION }}" \
+            --arg bucket "${{ steps.tfout.outputs.bucket }}" \
+            --arg dist   "${{ steps.tfout.outputs.dist }}" \
+            --arg domain "${{ steps.tfout.outputs.domain }}" \
+            --arg env    "${{ steps.env.outputs.env }}" \
+            '{event_type:"deploy_site",
+              client_payload:{project_path:$app, aws_region:$region,
+                              bucket_name:$bucket, cloudfront_distribution:$dist,
+                              cloudfront_domain:$domain, environment:$env}}')
+          # capture HTTP status to surface errors clearly
+          status=$(curl -sS -o /tmp/resp.json -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$OWNER/$REPO/dispatches" \
+            -d "$payload")
+          echo "Dispatch status: $status"
+          [[ "$status" =~ ^2 ]] || { echo "::error::repository_dispatch failed"; cat /tmp/resp.json || true; exit 1; }

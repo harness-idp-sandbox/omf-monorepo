@@ -26,6 +26,7 @@ jobs:
       project_path: ${{ steps.detect.outputs.project_path }}
       aws_region:  ${{ steps.region.outputs.region }}
       app_url:     ${{ steps.url.outputs.app_url }}
+      env_name:    ${{ steps.env.outputs.env_name }}
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
@@ -86,12 +87,30 @@ jobs:
           fi
           # Otherwise leave empty; we'll try to compute it in the deploy job
           echo "app_url=" >> "$GITHUB_OUTPUT"
+                
+      - name: Derive environment name
+        id: env
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 1) From repository_dispatch payload, if present
+          if [[ "${{ github.event_name }}" == "repository_dispatch" && -n "${{ github.event.client_payload.environment }}" ]]; then
+            echo "env_name=${{ github.event.client_payload.environment }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # 2) Otherwise derive from ref (main→prod; else branch/tag name)
+          REF="${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}"
+          REF="${REF#refs/tags/}"
+          ENV="${REF:-${GITHUB_REF_NAME}}"
+          [[ "$ENV" == "main" ]] && ENV="prod"
+          ENV="${ENV//\//-}"
+          echo "env_name=$ENV" >> "$GITHUB_OUTPUT"
 
   deploy:
     needs: detect
     runs-on: ubuntu-latest
     environment:
-      name: production
+      name: ${{ needs.detect.outputs.env_name }}
       url:  ${{ needs.detect.outputs.app_url }}
     defaults:
       run:
