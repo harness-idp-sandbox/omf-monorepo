@@ -4,140 +4,191 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TF_DIR="${ROOT}/terraform"
 
-: "${AWS_REGION:=us-east-1}"
-: "${USE_KMS:=false}"
-: "${STATE_KEY_PREFIX_OVERRIDE:=}"   # allow caller to pass this
+# --- Color codes for better readability
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
 
-# --- Preflight: ensure AWS creds are live
-if ! aws sts get-caller-identity >/dev/null 2>&1; then
-  echo "❌ No valid AWS credentials found for this shell."
-  echo "   Use 'aws sso login --profile <name>' + 'export AWS_PROFILE=<name>'"
-  echo "   or export AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY [/ AWS_SESSION_TOKEN]."
+# --- Helper function to derive GitHub slug from git remote
+derive_slug() {
+  if command -v git &>/dev/null && git rev-parse --is-inside-work-tree &>/dev/null; then
+    local remote_url
+    remote_url=$(git config --get remote.origin.url || echo "")
+    if [[ $remote_url =~ github\.com[:/]([^/]+)/([^/.]+) ]]; then
+      echo "${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    fi
+  fi
+}
+
+# --- Check if terraform.tfvars exists, if not create it from template
+TFVARS_FILE="${ROOT}/terraform.tfvars"
+TFVARS_TEMPLATE="${ROOT}/terraform.tfvars.template"
+
+if [[ ! -f "$TFVARS_FILE" ]]; then
+  if [[ -f "$TFVARS_TEMPLATE" ]]; then
+    echo -e "${YELLOW}Creating terraform.tfvars from template...${NC}"
+    cp "$TFVARS_TEMPLATE" "$TFVARS_FILE"
+  else
+    echo -e "${YELLOW}Creating default terraform.tfvars...${NC}"
+    cat > "$TFVARS_FILE" <<EOF
+# terraform.tfvars - Default values for iac-state module
+region                = "us-east-1"
+bucket_prefix         = "tfstate"
+bucket_name_override  = ""
+lock_table_name       = "tfstate-locks"
+use_kms               = false
+kms_key_arn           = ""
+state_key_prefix      = "repos/harness-idp-sandbox/harness-monorepo"
+noncurrent_version_expiration_days = 30
+abort_multipart_days  = 7
+bucket_force_destroy  = false
+tags = {
+  Project = "terraform-backend"
+  Owner   = "HarnessPOV"
+}
+EOF
+  fi
+  echo -e "${GREEN}✓ Created terraform.tfvars${NC}"
+  echo -e "${YELLOW}Please review and edit terraform.tfvars if needed before continuing.${NC}"
+  read -p "Press Enter to continue or Ctrl+C to abort..."
+fi
+
+# --- Configuration variables with helpful descriptions
+echo -e "${BLUE}======= Harness POV Terraform State Bootstrap =======${NC}"
+echo -e "${YELLOW}This script will create an S3 bucket and DynamoDB table for Terraform state management.${NC}"
+echo ""
+
+# --- Load values from terraform.tfvars
+echo -e "${BLUE}Loading configuration from terraform.tfvars...${NC}"
+
+# Read values from terraform.tfvars with defaults
+AWS_REGION=$(grep -E '^region\s*=' "$TFVARS_FILE" | sed -E 's/^region\s*=\s*"([^"]+)".*/\1/' || echo "us-east-1")
+BUCKET_PREFIX=$(grep -E '^bucket_prefix\s*=' "$TFVARS_FILE" | sed -E 's/^bucket_prefix\s*=\s*"([^"]+)".*/\1/' || echo "tfstate")
+LOCK_TABLE=$(grep -E '^lock_table_name\s*=' "$TFVARS_FILE" | sed -E 's/^lock_table_name\s*=\s*"([^"]+)".*/\1/' || echo "tfstate-locks")
+USE_KMS=$(grep -E '^use_kms\s*=' "$TFVARS_FILE" | sed -E 's/^use_kms\s*=\s*([a-zA-Z0-9_]+).*/\1/' || echo "false")
+PROJECT_TAG=$(grep -E 'Project\s*=' "$TFVARS_FILE" | sed -E 's/.*Project\s*=\s*"([^"]+)".*/\1/' || echo "terraform-backend")
+OWNER_TAG=$(grep -E 'Owner\s*=' "$TFVARS_FILE" | sed -E 's/.*Owner\s*=\s*"([^"]+)".*/\1/' || echo "HarnessPOV")
+
+# Allow overrides via command line
+read -p "$(echo -e "${BLUE}AWS Region [default: $AWS_REGION]: ${NC}")" AWS_REGION_OVERRIDE
+AWS_REGION=${AWS_REGION_OVERRIDE:-$AWS_REGION}
+
+read -p "$(echo -e "${BLUE}Use KMS encryption? (true/false) [default: $USE_KMS]: ${NC}")" USE_KMS_OVERRIDE
+USE_KMS=${USE_KMS_OVERRIDE:-$USE_KMS}
+
+read -p "$(echo -e "${BLUE}State key prefix override (leave empty for default): ${NC}")" STATE_KEY_PREFIX_OVERRIDE
+
+read -p "$(echo -e "${BLUE}S3 bucket name prefix [default: $BUCKET_PREFIX]: ${NC}")" BUCKET_PREFIX_OVERRIDE
+BUCKET_PREFIX=${BUCKET_PREFIX_OVERRIDE:-$BUCKET_PREFIX}
+
+read -p "$(echo -e "${BLUE}DynamoDB lock table name [default: $LOCK_TABLE]: ${NC}")" LOCK_TABLE_OVERRIDE
+LOCK_TABLE=${LOCK_TABLE_OVERRIDE:-$LOCK_TABLE}
+
+read -p "$(echo -e "${BLUE}Project tag [default: $PROJECT_TAG]: ${NC}")" PROJECT_TAG_OVERRIDE
+PROJECT_TAG=${PROJECT_TAG_OVERRIDE:-$PROJECT_TAG}
+
+read -p "$(echo -e "${BLUE}Owner tag [default: $OWNER_TAG]: ${NC}")" OWNER_TAG_OVERRIDE
+OWNER_TAG=${OWNER_TAG_OVERRIDE:-$OWNER_TAG}
+
+echo ""
+echo -e "${YELLOW}Configuration Summary:${NC}"
+echo -e "  ${BLUE}AWS Region:${NC} $AWS_REGION"
+echo -e "  ${BLUE}Use KMS:${NC} $USE_KMS"
+echo -e "  ${BLUE}State Key Prefix:${NC} ${STATE_KEY_PREFIX_OVERRIDE:-<default>}"
+echo -e "  ${BLUE}Bucket Prefix:${NC} $BUCKET_PREFIX"
+echo -e "  ${BLUE}DynamoDB Table:${NC} $LOCK_TABLE"
+echo -e "  ${BLUE}Project Tag:${NC} $PROJECT_TAG"
+echo -e "  ${BLUE}Owner Tag:${NC} $OWNER_TAG"
+echo ""
+
+# --- Confirm before proceeding
+read -p "$(echo -e "${YELLOW}Proceed with these settings? (y/n): ${NC}")" CONFIRM
+if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+  echo -e "${RED}Operation cancelled.${NC}"
+  exit 0
+fi
+
+echo ""
+echo -e "${BLUE}Checking AWS credentials...${NC}"
+
+# --- Verify AWS credentials
+if ! aws sts get-caller-identity &>/dev/null; then
+  echo -e "${RED}Error: AWS credentials not found or invalid.${NC}"
+  echo -e "${YELLOW}Please configure your AWS credentials and try again.${NC}"
+  echo -e "${YELLOW}You can use 'aws configure' or set the AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables.${NC}"
   exit 1
 fi
 
-# --- Derive org/repo slug (for the recommended prefix) BEFORE TF apply
-derive_slug() {
-  local url
-  url="$(git -C "${ROOT}/../.." config --get remote.origin.url 2>/dev/null || true)"
-  # Matches both git@github.com:org/repo.git and https://github.com/org/repo(.git)
-  if [[ "$url" =~ github\.com[:/]+([^/]+)/([^/.]+) ]]; then
-    echo "${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
-  fi
-}
-SLUG="$(derive_slug || true)"
-
-# Recommended default: repos/<org>/<repo>
-STATE_KEY_PREFIX_DEFAULT="repos/${SLUG:-<org>/<repo>}"
-if [[ -n "$STATE_KEY_PREFIX_OVERRIDE" ]]; then
-  STATE_KEY_PREFIX_DEFAULT="$STATE_KEY_PREFIX_OVERRIDE"
+# --- Check if Terraform is installed
+if ! command -v terraform &>/dev/null; then
+  echo -e "${RED}Error: Terraform not found.${NC}"
+  echo -e "${YELLOW}Please install Terraform and try again.${NC}"
+  exit 1
 fi
 
-# --- Provision backend infra (now with the exact state_key_prefix)
+# --- Create terraform directory if it doesn't exist
+mkdir -p "${TF_DIR}"
+
+# --- Create terraform directory if it doesn't exist
+mkdir -p "${TF_DIR}"
+
+# --- Apply Terraform configuration
 pushd "${TF_DIR}" >/dev/null
-  terraform init -input=false
-  terraform apply -auto-approve -input=false \
+  # Initialize Terraform
+  echo -e "${BLUE}Initializing Terraform...${NC}"
+  terraform init
+
+  # Apply Terraform configuration
+  echo -e "${BLUE}Applying Terraform configuration...${NC}"
+  terraform apply \
     -var "region=${AWS_REGION}" \
+    -var "bucket_prefix=${BUCKET_PREFIX}" \
+    -var "lock_table_name=${LOCK_TABLE}" \
     -var "use_kms=${USE_KMS}" \
-    -var "state_key_prefix=${STATE_KEY_PREFIX_DEFAULT}"
-  BUCKET=$(terraform output -raw bucket)
-  TABLE=$(terraform output -raw dynamodb_table)
+    ${STATE_KEY_PREFIX_OVERRIDE:+-var "state_key_prefix=${STATE_KEY_PREFIX_OVERRIDE}"} \
+    -var "tags={Project=\"${PROJECT_TAG}\",Owner=\"${OWNER_TAG}\"}" \
+    -auto-approve
+
+  # Output the backend configuration
+  echo -e "${BLUE}Retrieving backend configuration...${NC}"
+  BUCKET_NAME=$(terraform output -raw bucket_name)
+  DYNAMODB_TABLE=$(terraform output -raw dynamodb_table)
   REGION=$(terraform output -raw region)
-  BACKEND_EXAMPLE=$(terraform output -raw backend_hcl_example)
 popd >/dev/null
 
-ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
-TFSTATE_BUCKET_ARN="arn:aws:s3:::${BUCKET}"
-LOCK_TABLE_ARN="arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${TABLE}"
-
-# --- Write the original example template (from TF outputs)
-cat > "${ROOT}/backend.hcl.tpl" <<EOF
-${BACKEND_EXAMPLE}
-EOF
-
-# --- Write the recommended template (stable key prefix)
-cat > "${ROOT}/backend.hcl.recommended.tpl" <<EOF
-bucket         = "${BUCKET}"
-key            = "${STATE_KEY_PREFIX_DEFAULT}/<app-path>/terraform.tfstate"
+# --- Generate backend.hcl example
+cat > "${ROOT}/backend.hcl.example" <<EOF
+bucket         = "${BUCKET_NAME}"
+key            = "repos/ORGANIZATION/REPOSITORY/ENVIRONMENT/terraform.tfstate"
 region         = "${REGION}"
-dynamodb_table = "${TABLE}"
+dynamodb_table = "${DYNAMODB_TABLE}"
 encrypt        = true
 EOF
 
-# --- Convenience .env (handy for GH Actions repo secrets)
-cat > "${ROOT}/backend.env" <<EOF
-TFSTATE_BUCKET=${BUCKET}
-TF_LOCK_TABLE=${TABLE}
+# --- Generate GitHub Actions secrets example
+cat > "${ROOT}/github-actions-secrets.example" <<EOF
+TFSTATE_BUCKET=${BUCKET_NAME}
+TF_LOCK_TABLE=${DYNAMODB_TABLE}
 AWS_REGION=${REGION}
-STATE_KEY_PREFIX=${STATE_KEY_PREFIX_DEFAULT}
-# Useful for OIDC bootstrap (attach backend access policy):
-TFSTATE_BUCKET_ARN=${TFSTATE_BUCKET_ARN}
-LOCK_TABLE_ARN=${LOCK_TABLE_ARN}
 EOF
 
-echo
-echo "✔ Remote state bootstrap complete."
-echo "  S3 bucket:        ${BUCKET}"
-echo "  DynamoDB table:   ${TABLE}"
-echo "  Region:           ${REGION}"
-echo
-echo "Wrote:"
-echo "  - ${ROOT}/backend.hcl.tpl              (original example; contains <project_slug>)"
-echo "  - ${ROOT}/backend.hcl.recommended.tpl (preferred: key uses '${STATE_KEY_PREFIX_DEFAULT}/<app-path>')"
-echo "  - ${ROOT}/backend.env                 (values to copy into GH repo secrets)"
-
-# --- NEXT STEPS (friendly guide)
-NEXT="${ROOT}/NEXT_STEPS.txt"
-cat > "$NEXT" <<EOF
-Remote backend is ready ✅
-
-Add these GitHub secrets in your monorepo (Settings → Secrets → Actions):
-  TFSTATE_BUCKET=${BUCKET}
-  TF_LOCK_TABLE=${TABLE}
-  AWS_REGION=${REGION}
-  STATE_KEY_PREFIX=${STATE_KEY_PREFIX_DEFAULT}
-
-(If you're bootstrapping the OIDC role and want to attach backend access:)
-  TFSTATE_BUCKET_ARN=${TFSTATE_BUCKET_ARN}
-  LOCK_TABLE_ARN=${LOCK_TABLE_ARN}
-
-Recommended backend.hcl (replace <app-path> with e.g. apps/my-react-app):
------------------------------------------------
-bucket         = "${BUCKET}"
-key            = "${STATE_KEY_PREFIX_DEFAULT}/<app-path>/terraform.tfstate"
-region         = "${REGION}"
-dynamodb_table = "${TABLE}"
-encrypt        = true
------------------------------------------------
-
-In your workflow, write backend.hcl like:
------------------------------------------------
-cat > backend.hcl <<'EOT'
-bucket         = "\${{ secrets.TFSTATE_BUCKET }}"
-key            = "\${{ secrets.STATE_KEY_PREFIX }}/\${{ needs.detect.outputs.project_path }}/terraform.tfstate"
-region         = "\${{ secrets.AWS_REGION }}"
-dynamodb_table = "\${{ secrets.TF_LOCK_TABLE }}"
-encrypt        = true
-EOT
------------------------------------------------
-EOF
-
-echo "📄 Wrote next steps to: $NEXT"
-echo "   Copy these into GitHub repo secrets:"
-echo "     - TFSTATE_BUCKET=${BUCKET}"
-echo "     - TF_LOCK_TABLE=${TABLE}"
-echo "     - AWS_REGION=${REGION}"
-echo "     - STATE_KEY_PREFIX=${STATE_KEY_PREFIX_DEFAULT}"
-
-# Optional: set secrets automatically with GitHub CLI if available
-if command -v gh >/dev/null 2>&1; then
-  echo
-  read -r -p "Use 'gh secret set' to push these to the current repo? [y/N] " yn
-  if [[ "$yn" =~ ^[Yy]$ ]]; then
-    gh secret set TFSTATE_BUCKET   -b "${BUCKET}"
-    gh secret set TF_LOCK_TABLE    -b "${TABLE}"
-    gh secret set AWS_REGION       -b "${REGION}"
-    gh secret set STATE_KEY_PREFIX -b "${STATE_KEY_PREFIX_DEFAULT}"
-    echo "✔ Secrets set via GitHub CLI."
-  fi
-fi
+echo -e "${GREEN}✓ Terraform state infrastructure successfully created!${NC}"
+echo ""
+echo -e "${BLUE}Backend Configuration:${NC}"
+echo -e "  ${YELLOW}S3 Bucket:${NC} ${BUCKET_NAME}"
+echo -e "  ${YELLOW}DynamoDB Table:${NC} ${DYNAMODB_TABLE}"
+echo -e "  ${YELLOW}Region:${NC} ${REGION}"
+echo ""
+echo -e "${BLUE}Example backend.hcl has been generated at:${NC} ${ROOT}/backend.hcl.example"
+echo -e "${BLUE}Example GitHub Actions secrets have been generated at:${NC} ${ROOT}/github-actions-secrets.example"
+echo ""
+echo -e "${YELLOW}To use this backend in your Terraform configurations:${NC}"
+echo -e "  1. Copy the backend.hcl.example to your project"
+echo -e "  2. Update the 'key' parameter with your specific path"
+echo -e "  3. Initialize Terraform with: terraform init -backend-config=backend.hcl"
+echo ""
+echo -e "${YELLOW}For GitHub Actions:${NC}"
+echo -e "  1. Add the secrets from github-actions-secrets.example to your repository"
+echo -e "  2. Configure your workflow to use these secrets for backend configuration"

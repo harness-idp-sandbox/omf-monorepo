@@ -11,7 +11,7 @@ It is intended to demonstrate how a customer’s monorepo might be structured wh
 > Customers typically will not perform bootstrap steps themselves.
 
 Bootstrap includes:
-- Creating this repo (e.g., `monorepo-idp-example`) under the customer’s GitHub org.  
+- Creating this repo (e.g., `harness-monorepo`) under a standard GitHub org (`harness-idp-sandbox`).  
 - Adding `.harness/` and `.github/` defaults (pipeline configs, PR templates, CODEOWNERS).  
 - Connecting the repo to Harness (via GitHub connector).  
 - Seeding example apps or shared code if needed.  
@@ -40,7 +40,7 @@ See the app-level `README.md` for local dev, CI/CD, and environment details.
 
 1. Open the Harness IDP action **“E2E React App Provisioning”**.  
 2. Fill in:
-   - **Base repo**: this repo’s name (e.g. `monorepo-idp-example`)  
+   - **Base repo**: this repo’s name (e.g. `harness-monorepo`)  
    - **Base branch**: usually `main`  
    - **Project details**: name, slug, owner, description, team  
 3. The pipeline will:

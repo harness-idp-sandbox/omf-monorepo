@@ -1,39 +1,36 @@
+# Add description comments
 module "iac_state" {
   source = "./modules/iac-state"
 
-  region            = var.region
-  bucket_name_prefix = var.bucket_name_prefix
-  lock_table_name   = var.lock_table_name
-  tags              = var.tags
+  # Basic configuration
+  region          = var.region
+  bucket_prefix   = var.bucket_name_prefix # Fix variable name to match module
+  lock_table_name = var.lock_table_name
+
+  # Optional: Configure state key prefix for better organization
+  state_key_prefix = var.state_key_prefix
+
+  # Pass through all tags
+  tags = var.tags
 }
 
 module "oidc" {
   source = "./modules/oidc"
 
-  region                   = var.region
-  github_org               = var.github_org
-  github_repo              = var.github_repo
-  allowed_refs             = var.allowed_refs
+  # Basic configuration
+  region      = var.region
+  github_org  = var.github_org
+  github_repo = var.github_repo
+
+  # Security settings
+  allowed_subjects         = var.allowed_refs # Fix variable name to match module
   role_name                = var.role_name
   session_duration_seconds = var.session_duration_seconds
-}
 
-output "bucket" {
-  value = module.iac_state.bucket
-}
+  # Connect to the state module
+  attach_backend_access      = true
+  backend_access_policy_json = module.iac_state.backend_access_policy_json
 
-output "dynamodb_table" {
-  value = module.iac_state.dynamodb_table
-}
-
-output "region" {
-  value = module.iac_state.region
-}
-
-output "role_arn" {
-  value = module.oidc.role_arn
-}
-
-output "oidc_provider_arn" {
-  value = module.oidc.oidc_provider_arn
+  # Pass through all tags
+  tags = var.tags
 }

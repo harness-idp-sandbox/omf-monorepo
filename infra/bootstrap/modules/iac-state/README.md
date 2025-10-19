@@ -1,220 +1,180 @@
-# iac-state (Terraform backend bootstrap)
+# GitHub OIDC Role Module (Terraform)
 
-Bootstraps a **remote Terraform backend** for a new GitHub org’s infra POCs:
-- **S3 bucket** (private, TLS-only, versioned, optionally SSE-KMS)
-- **DynamoDB table** for state **locking**
-- **Policy JSON output** you can attach to your **GitHub OIDC role** (just enough to read/write state + lock)
-
-> **One-time per AWS account + GitHub org** is typical. You’ll reuse the same backend for multiple repos/stacks by choosing distinct S3 keys.
+This module provisions an **IAM Role** and optional **OIDC Provider** for use with **GitHub Actions**.  
+It allows workflows in specified organizations, repositories, and branches (or tags, PRs, environments) to assume an AWS role using the OIDC federation trust.
 
 ---
 
-## When to use this
+## 📦 Module Overview
 
-Use this module **before** you set up:
-- A new **GitHub org** (e.g. `harness-idp-sandbox`) where you’ll scaffold `<customer>-admin-repo` and `<customer>-monorepo`.
-- An **OIDC role** that GitHub Actions will assume to run Terraform.
-- Any **cookiecutter**-generated repos that will store TF state in this shared backend.
-
-> If your account already has a stable TF state bucket + lock table you want to reuse, you don’t need to run this. Just point your stacks to that existing backend.
-
----
-
-## What it creates
-
-- **S3** bucket: private, versioned, **TLS-only** (policy denies non-TLS), optional **SSE-KMS**
-- **DynamoDB** table: `PAY_PER_REQUEST`, SSE enabled; used by Terraform for state locking
-- **Outputs**:
-  - `bucket_name`, `bucket_arn`, `dynamodb_table`, `dynamodb_table_arn`, `region`
-  - `backend_access_policy_json` → attach to your OIDC role
-  - `backend_hcl_example` → copy/paste for `terraform init -backend-config=backend.hcl`
-  - `backend_metadata` → script-friendly map
+| Capability | Description |
+|-------------|-------------|
+| **IAM Role** | Role trusted by GitHub's OIDC provider (`token.actions.githubusercontent.com`) |
+| **OIDC Provider** | Can create or reuse an existing provider |
+| **Scoped Trust** | Restricts allowed subjects to specific orgs, repos, branches, tags, or environments |
+| **Backend Policy (optional)** | Attaches path-scoped S3 + DynamoDB access for Terraform remote state |
+| **Least Privilege Ready** | Accepts JSON from `iac-state` module to restrict state access |
 
 ---
 
-## Inputs
+## 🧩 Inputs
 
 | Variable | Description | Default |
-|---|---|---|
-| `region` | AWS region for the backend | `us-east-1` |
-| `bucket_prefix` | Bucket name prefix; random suffix is appended if no override | `tfstate` |
-| `bucket_name_override` | Use this exact bucket name (skips random suffix) | `""` |
-| `bucket_force_destroy` | Allow deleting bucket **and objects** (normally `false`) | `false` |
-| `lock_table_name` | DynamoDB lock table name | `tfstate-locks` |
-| `use_kms` | Use SSE-KMS for the bucket (vs AES256) | `false` |
-| `kms_key_arn` | Existing KMS key ARN (when `use_kms=true`) | `""` |
-| `kms_alias` | Alias for a **new** KMS key if `use_kms=true` and no ARN | `alias/tfstate` |
-| `noncurrent_version_expiration_days` | Keep noncurrent versions this many days | `30` |
-| `abort_multipart_days` | Abort incomplete multipart uploads after N days | `7` |
-| `state_key_prefix` | Base path for state keys (used in example output) | `repos/harness-idp-sandbox/harness-monorepo` |
-| `tags` | Common tags | `{ Project="terraform-backend", Owner="HarnessPOV" }` |
-
-> **Note:** The bucket has `prevent_destroy = true` by default to protect state. See **Teardown** if you ever need to nuke it.
+|-----------|-------------|----------|
+| `region` | AWS region for IAM operations | `us-east-1` |
+| `github_org` | GitHub organization name | *(required)* |
+| `github_repo` | Repository name (optional, empty = all repos in org) | `""` |
+| `allowed_subjects` | List of allowed refs or subjects (branches, tags, pull_request, environment:dev) | `["refs/heads/main"]` |
+| `role_name` | Name of the IAM Role | `gha-oidc-role` |
+| `session_duration_seconds` | Max STS session duration | `3600` |
+| `create_oidc_provider` | Whether to create the OIDC provider | `false` |
+| `existing_oidc_provider_arn` | ARN of an existing OIDC provider | `""` |
+| `oidc_thumbprint_list` | List of provider thumbprints | `[6938fd4d98ba…]` |
+| `attach_backend_access` | Attach backend access policy to role | `false` |
+| `backend_access_policy_json` | JSON policy (preferred, from iac-state output) | `""` |
+| `tfstate_bucket_arn` | Fallback: S3 bucket ARN for Terraform state | `""` |
+| `lock_table_arn` | Fallback: DynamoDB table ARN for locks | `""` |
+| `tags` | Map of resource tags | `{}` |
 
 ---
 
-## How to run it
+## 🚀 How to Run It
+
+### Using the Helper Scripts (Recommended)
+
+The module includes helper scripts for easier setup:
+
+```bash
+# Run the apply script (interactive setup)
+./apply.sh
+
+# To destroy (use with caution!)
+./destroy.sh
+```
+
+The `apply.sh` script will:
+
+- Read configuration from your `terraform.tfvars` file  
+- Prompt for key variables with defaults from your tfvars  
+- Apply the Terraform configuration  
+- Generate an `oidc.env` file with the role ARN for GitHub Actions  
+
+---
+
+### Manual Setup
 
 From the module directory:
 
 ```bash
+# Create terraform.tfvars if you don't have one
+cp terraform.tfvars.example terraform.tfvars
+# Edit terraform.tfvars as needed
+
+# Apply the configuration
 terraform fmt
 terraform init
 terraform plan
 terraform apply -auto-approve
 ```
 
-Optionally provide overrides via `terraform.tfvars`:
+Example `terraform.tfvars`:
 
 ```hcl
-region                = "us-east-1"
-bucket_prefix         = "tfstate"
-bucket_name_override  = ""        # or "my-shared-tf-backend"
-lock_table_name       = "tfstate-locks"
-use_kms               = false     # set true if you want SSE-KMS
-kms_key_arn           = ""        # leave empty to create a new key when use_kms=true
-state_key_prefix      = "repos/harness-idp-sandbox/harness-monorepo"
-tags = {
-  Project = "terraform-backend"
-  Owner   = "HarnessPOV"
-}
+region                     = "us-east-1"
+github_org                 = "harness-idp-sandbox"
+github_repo                = "customer-monorepo"
+allowed_subjects           = ["refs/heads/main", "pull_request", "environment:dev"]
+role_name                  = "gha-oidc-role"
+create_oidc_provider       = false
+existing_oidc_provider_arn = "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"
+attach_backend_access      = true
+backend_access_policy_json = "..." # From iac-state module output
 ```
 
 ---
 
-## What to do after running it
+## 🧩 Outputs
 
-1) **Capture outputs**
-   ```bash
-   terraform output -raw bucket_name
-   terraform output -raw dynamodb_table
-   terraform output -raw region
-   terraform output -raw backend_access_policy_json > backend-policy.json
-   terraform output backend_hcl_example
-   ```
-
-2) **Attach backend access to your GitHub OIDC role**  
-   - If you already created an OIDC role for GitHub Actions, attach a policy with the contents of `backend-policy.json`.  
-   - If you’re using an OIDC **module**, feed `backend_access_policy_json` to that module so it creates/attaches the policy for you.
-
-3) **Wire GitHub Actions to the backend**  
-   In each repo that will run Terraform, create a `backend.hcl` using the example output (change the `key` per stack):
-   ```hcl
-   bucket         = "<bucket_name output>"
-   key            = "repos/<org>/<repo>/<env>/<app>/terraform.tfstate"
-   region         = "<region output>"
-   dynamodb_table = "<dynamodb_table output>"
-   encrypt        = true
-   ```
-
-   Then initialize your stacks with:
-   ```bash
-   terraform init -backend-config=backend.hcl
-   ```
-
-4) **Set repo secrets/variables** (if you prefer GH to compose backend.hcl at runtime):
-   - Secrets: `TFSTATE_BUCKET`, `TF_LOCK_TABLE`, `AWS_REGION`
-   - In workflows, write `backend.hcl` on the fly (you already have examples).
+| Output | Description |
+|---------|-------------|
+| `role_arn` | ARN of the IAM Role for GitHub Actions |
+| `oidc_provider_arn` | ARN of the created or existing OIDC provider |
 
 ---
 
-## How to tell if it’s been run (verification)
+## 🧱 Integration with iac-state
 
-- **Terraform outputs** exist and look sane:
-  ```bash
-  terraform output backend_metadata
-  # => { bucket = "...", dynamodb_table = "...", region = "..." }
-  ```
+Pass the JSON output from your Terraform state backend module:
 
-- **S3**: the bucket exists, has versioning enabled, and TLS-only bucket policy:
-  ```bash
-  aws s3 ls "s3://<bucket_name>/"
-  aws s3api get-bucket-versioning --bucket <bucket_name>
-  aws s3api get-bucket-policy --bucket <bucket_name> | jq .
-  ```
+```hcl
+backend_access_policy_json = module.iac_state.backend_access_policy_json
+```
 
-- **DynamoDB**: the table exists and has SSE:
-  ```bash
-  aws dynamodb describe-table --table-name <dynamodb_table> | jq '.Table.TableStatus,.Table.SSEDescription'
-  ```
-
-- **A stack can init against it**:
-  ```bash
-  cd some/stack
-  terraform init -backend-config=../backend.hcl
-  terraform state pull >/dev/null && echo "Remote backend reachable"
-  ```
-
-- **During a plan/apply**, you can see a lock appear:
-  ```bash
-  aws dynamodb scan --table-name <dynamodb_table> --query 'Items'
-  ```
+This ensures your OIDC role has least-privilege access to the correct S3 prefix and DynamoDB table for state locking.
 
 ---
 
-## Teardown (only if you truly need to)
+## ✅ How to Tell If It's Been Run (Verification)
 
-1) Make sure **no stacks** are using this backend (migrate them off).
-2) Temporarily allow deletion:
-   - In the bucket resource, **remove** the `lifecycle { prevent_destroy = true }` block.
-   - Set `bucket_force_destroy = true`.
-3) `terraform apply`, then `terraform destroy -auto-approve`.
+**Check for helper files:**  
+If `oidc.env` exists in the module directory, the module has likely been applied.
 
-> Versioned buckets can have lots of noncurrent versions. `force_destroy = true` lets Terraform remove them automatically; otherwise, empty the bucket first.
+**Verify Terraform outputs:**
+
+```bash
+terraform output role_arn
+# => arn:aws:iam::123456789012:role/gha-oidc-role
+```
+
+**Check IAM role:**
+
+```bash
+aws iam get-role --role-name gha-oidc-role
+```
+
+**Check trust relationship:**
+
+```bash
+aws iam get-role --role-name gha-oidc-role --query "Role.AssumeRolePolicyDocument" --output json
+```
 
 ---
 
-## Typical repo workflow snippet
+## 🧩 GitHub Actions Example
 
 ```yaml
-permissions:
-  id-token: write
-  contents: read
-
-steps:
-  - uses: actions/checkout@v4
-
-  - name: Configure AWS (OIDC)
-    uses: aws-actions/configure-aws-credentials@v4
-    with:
-      role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
-      aws-region:     ${{ secrets.AWS_REGION }}
-
-  - name: Write backend.hcl
-    run: |
-      cat > backend.hcl <<'EOF'
-      bucket         = "${{ secrets.TFSTATE_BUCKET }}"
-      key            = "repos/${{ github.repository_owner }}/${{ github.event.repository.name }}/prod/appX/terraform.tfstate"
-      region         = "${{ secrets.AWS_REGION }}"
-      dynamodb_table = "${{ secrets.TF_LOCK_TABLE }}"
-      encrypt        = true
-      EOF
-
-  - uses: hashicorp/setup-terraform@v3
-
-  - name: Terraform init
-    run: terraform init -backend-config=backend.hcl -input=false
+jobs:
+  terraform:
+    name: 'Terraform'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # Required for OIDC
+      contents: read
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      
+      - name: Terraform Init
+        run: terraform init -backend-config=backend.hcl
+      
+      - name: Terraform Plan
+        run: terraform plan -out=tfplan
 ```
 
 ---
 
-## FAQ
+## 🧠 Notes for Sales Engineers
 
-**Q: Can I reuse this backend across many repos and environments?**  
-Yes. Use a unique **`key`** per stack (e.g., `repos/<org>/<repo>/<env>/<app>/terraform.tfstate`).
-
-**Q: Should I enable KMS?**  
-If your org mandates KMS, set `use_kms = true`. Provide `kms_key_arn` to use an existing key, or leave it empty to let the module create one with alias `alias/tfstate`.
-
-**Q: Why `prevent_destroy` on the bucket?**  
-To protect shared state from accidental deletion. Temporarily remove it + set `bucket_force_destroy = true` if you must tear down.
-
-**Q: How do I scope actions for my OIDC role?**  
-Attach the `backend_access_policy_json` from this module to grant only S3 object access on this bucket + CRUD on the lock table. Add additional policies as needed for your infra.
+- SEs should **never modify IAM trust logic manually** — use input variables or environment overrides in `apply.sh`.  
+- Always test with a **sandbox AWS account first**.  
+- Set `CREATE_OIDC_PROVIDER=true` only if the account has **no provider yet**.  
+- Use the `oidc.env` file to populate repo/org secrets automatically in Harness IDP pipelines.  
+- For secure operations, always **scope the role** to specific repositories and branches.
 
 ---
-
-## License / Ownership
-
-- Tags default to `Project=terraform-backend` and `Owner=HarnessPOV`. Adjust as needed.
-- Keep this module in a central infra repo; consume its outputs in downstream stacks and GH workflows.

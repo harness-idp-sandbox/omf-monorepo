@@ -1,39 +1,59 @@
-module "iac_state" {
-  source = "./modules/iac-state"
-
-  region            = var.region
-  bucket_name_prefix = var.bucket_name_prefix
-  lock_table_name   = var.lock_table_name
-  tags              = var.tags
+# infra/bootstrap/variables.tf
+variable "region" {
+  description = "AWS region for all resources"
+  type        = string
+  default     = "us-east-1"
 }
 
-module "oidc" {
-  source = "./modules/oidc"
-
-  region                   = var.region
-  github_org               = var.github_org
-  github_repo              = var.github_repo
-  allowed_refs             = var.allowed_refs
-  role_name                = var.role_name
-  session_duration_seconds = var.session_duration_seconds
+variable "bucket_name_prefix" {
+  description = "Prefix for the S3 bucket name"
+  type        = string
+  default     = "tfstate"
 }
 
-output "bucket" {
-  value = module.iac_state.bucket
+variable "lock_table_name" {
+  description = "Name of the DynamoDB table for state locking"
+  type        = string
+  default     = "tfstate-locks"
 }
 
-output "dynamodb_table" {
-  value = module.iac_state.dynamodb_table
+variable "state_key_prefix" {
+  description = "Prefix for state keys in the bucket"
+  type        = string
+  default     = "repos/your-org/your-repo"
 }
 
-output "region" {
-  value = module.iac_state.region
+variable "github_org" {
+  description = "GitHub organization name"
+  type        = string
 }
 
-output "role_arn" {
-  value = module.oidc.role_arn
+variable "github_repo" {
+  description = "GitHub repository name (empty for any repo in the org)"
+  type        = string
+  default     = ""
 }
 
-output "oidc_provider_arn" {
-  value = module.oidc.oidc_provider_arn
+variable "allowed_refs" {
+  description = "List of GitHub refs that can assume the role"
+  type        = list(string)
+  default     = ["refs/heads/main"]
+}
+
+variable "role_name" {
+  description = "Name of the IAM role for GitHub Actions"
+  type        = string
+  default     = "gha-oidc-role"
+}
+
+variable "session_duration_seconds" {
+  description = "Maximum session duration for the role"
+  type        = number
+  default     = 3600
+}
+
+variable "tags" {
+  description = "Tags to apply to all resources"
+  type        = map(string)
+  default     = {}
 }

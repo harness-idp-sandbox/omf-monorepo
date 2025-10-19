@@ -1,0 +1,12 @@
+{
+  "recommendations": [
+    "windsurf.windsurf", // Windsurf
+    "hashicorp.terraform", // Terraform syntax + language server
+    "redhat.vscode-yaml", // YAML support and schema validation
+    "ms-azuretools.vscode-docker", // Dockerfile + Compose linting/intellisense
+    "github.vscode-github-actions", // GitHub Actions workflow support
+    "ms-kubernetes-tools.vscode-kubernetes-tools", // K8s manifests and clusters
+    "foxundermoon.shell-format",
+    "DavidAnson.vscode-markdownlint"
+  ]
+}
