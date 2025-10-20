@@ -9,5 +9,5 @@ role_name                = "gha-oidc-role"
 session_duration_seconds = 3600
 tags = {
   Project = "terraform-backend"
-  Owner   = "HarnessPOV"
+  Owner   = "HarnessPOV-omf"
 }

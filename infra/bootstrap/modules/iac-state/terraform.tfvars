@@ -11,5 +11,5 @@ abort_multipart_days               = 7
 bucket_force_destroy               = false
 tags = {
   Project = "terraform-backend"
-  Owner   = "HarnessPOV"
+  Owner   = "HarnessPOV-omf"
 }
