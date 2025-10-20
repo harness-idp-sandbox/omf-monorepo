@@ -67,7 +67,7 @@ variable "abort_multipart_days" {
 variable "state_key_prefix" {
   description = "Prefix used in backend key examples, e.g., 'repos/<org>/<repo>' or 'repos/<org>/<repo>/<env>'."
   type        = string
-  default     = "repos/harness-idp-sandbox/harness-monorepo"
+  default     = "repos/harness-idp-sandbox/omf-monorepo"
 }
 
 variable "tags" {
